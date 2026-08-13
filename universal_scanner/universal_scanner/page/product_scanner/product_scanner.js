@@ -376,7 +376,7 @@ UniversalScanner.prototype = {
     background: rgba(0,0,0,0.7);\
     min-height: 26px;\
     letter-spacing: 0.2px;\
-}
+}\
 \
 .us-feedback {\
     margin-top: 12px; min-height: 28px;\
