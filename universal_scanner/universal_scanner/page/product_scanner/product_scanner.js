@@ -1407,74 +1407,150 @@ UniversalScanner.prototype = {
     },
 
     // ────────────────────────────────────────────────────────────────
-    // _captureAndScan: main entry point for video camera frames
-    // Runs Stages 1 through 8
+    // _captureAndScan
+    // Entry point for the “CAPTURE & SCAN EAN” button.
+    // Invariant: capture button MUST be re-enabled on every exit path
+    // (success, failure, exception, timeout) via the _captureSetBusy helper.
     // ────────────────────────────────────────────────────────────────
+
+    // Enable/disable the capture button and update status text
+    _captureSetBusy: function (busy, statusText) {
+        $('#us-capture-btn').prop('disabled', busy);
+        if (statusText) {
+            $('#us-cam-status').text(statusText);
+        }
+    },
+
     _captureAndScan: function () {
         var self = this;
 
+        // Guard: camera must be active
         if (!this.state.cameraActive || !this.state.cameraStream) {
             frappe.msgprint(__('Camera is not active. Click "📷 Start Camera" first.'));
             return;
         }
-        if (this.state.isProcessing) { return; }
-
-        $('#us-dbg-stages').html('');
-        $('#us-dbg-imgs').html('');
-        $('#us-debug-panel').addClass('us-dbg-visible');
-        $('#us-capture-btn').prop('disabled', true);
-        $('#us-cam-status').text('⏳ Capturing frame…');
-
-        var video  = document.getElementById('us-camera-video');
-        var canvas = document.getElementById('us-capture-canvas');
-
-        var vw = video.videoWidth;
-        var vh = video.videoHeight;
-
-        // Stage 1: Camera frame captured
-        self._dbgStage(1, 'Camera frame captured', 'info');
-
-        if (!vw || !vh) {
-            self._dbgStage(1, 'FAIL — video dimensions are 0. Camera preview not loaded.', 'fail');
-            self._captureReset('Camera preview loading. Wait a moment and try again.');
+        // Guard: prevent overlapping captures
+        if (this.state.isCapturing) {
+            console.log('CAPTURE: already in progress, ignoring click');
             return;
         }
 
-        // Stage 2: Original frame dimensions
-        self._dbgStage(2, 'Canvas dimensions: ' + vw + 'x' + vh + ' px (Display: ' + video.clientWidth + 'x' + video.clientHeight + ')', 'ok');
+        this.state.isCapturing = true;
 
-        canvas.width  = vw;
-        canvas.height = vh;
-        var ctx = canvas.getContext('2d');
-        ctx.drawImage(video, 0, 0, vw, vh);
-        self._dbgAddImage(canvas, 'Full frame (' + vw + 'x' + vh + ')');
+        // Reset debug panel and disable button FIRST (before any async work)
+        $('#us-dbg-stages').html('');
+        $('#us-dbg-imgs').html('');
+        $('#us-debug-panel').addClass('us-dbg-visible');
+        self._captureSetBusy(true, '⏳ Capturing frame…');
 
-        // Stage 3: Scan-box crop
-        var overlay   = document.querySelector('.us-cam-overlay');
-        var dispW     = overlay ? overlay.clientWidth  : video.clientWidth;
-        var dispH     = overlay ? overlay.clientHeight : video.clientHeight;
-        var scaleX    = vw / dispW;
-        var scaleY    = vh / dispH;
+        console.log('CAPTURE: button clicked');
+        self._dbgStage(1, 'Button clicked', 'info');
 
-        var boxW_disp = dispW * 0.70;
-        var boxH_disp = dispH * 0.38;
-        var boxX_disp = (dispW - boxW_disp) / 2;
-        var boxY_disp = (dispH - boxH_disp) / 2;
+        // Use a try/finally so the button is ALWAYS re-enabled
+        try {
+            var video = document.getElementById('us-camera-video');
 
-        var cropX = Math.max(0, Math.min(Math.round(boxX_disp * scaleX), vw - 1));
-        var cropY = Math.max(0, Math.min(Math.round(boxY_disp * scaleY), vh - 1));
-        var cropW = Math.min(Math.round(boxW_disp * scaleX), vw - cropX);
-        var cropH = Math.min(Math.round(boxH_disp * scaleY), vh - cropY);
+            // Stage 2: Check video readyState
+            console.log('CAPTURE: video readyState =', video ? video.readyState : 'no element');
+            console.log('CAPTURE: video dimensions =', video ? video.videoWidth : '?', 'x', video ? video.videoHeight : '?');
 
-        self._dbgStage(3, 'Scan-box crop: ' + cropW + 'x' + cropH + ' px at (' + cropX + ',' + cropY + ')', 'ok');
+            if (!video) {
+                self._dbgStage(2, 'FAIL — #us-camera-video element not found', 'fail');
+                self._captureSetBusy(false, '❌ Camera element missing. Reload the page.');
+                this.state.isCapturing = false;
+                return;
+            }
 
-        var cropCanvas = document.createElement('canvas');
-        cropCanvas.width  = cropW;
-        cropCanvas.height = cropH;
-        cropCanvas.getContext('2d').drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-        self._dbgAddImage(cropCanvas, 'Scan box (' + cropW + 'x' + cropH + ')');
+            if (video.readyState < 2) {
+                self._dbgStage(2, 'FAIL — video.readyState=' + video.readyState + ' (must be ≥ 2)', 'fail');
+                self._captureSetBusy(false, '⚠ Camera is still loading. Wait a moment and try again.');
+                this.state.isCapturing = false;
+                return;
+            }
 
-        self._processScanPipeline(canvas, cropCanvas);
+            var vw = video.videoWidth;
+            var vh = video.videoHeight;
+
+            if (!vw || !vh) {
+                self._dbgStage(2, 'FAIL — video.videoWidth=' + vw + ' video.videoHeight=' + vh, 'fail');
+                self._captureSetBusy(false, '⚠ Camera frame not ready. Try again in a moment.');
+                this.state.isCapturing = false;
+                return;
+            }
+
+            self._dbgStage(2, 'Video ready — readyState=' + video.readyState + ', dimensions=' + vw + 'x' + vh, 'ok');
+            console.log('CAPTURE: video ready, dimensions', vw, 'x', vh);
+
+            // Stage 3: Create canvas and draw frame
+            self._dbgStage(3, 'Creating canvas ' + vw + 'x' + vh + '…', 'info');
+            self._captureSetBusy(true, '⏳ Drawing camera frame to canvas…');
+
+            var canvas = document.getElementById('us-capture-canvas');
+            canvas.width  = vw;
+            canvas.height = vh;
+            var ctx = canvas.getContext('2d');
+
+            console.log('CAPTURE: calling ctx.drawImage()');
+            ctx.drawImage(video, 0, 0, vw, vh);
+            console.log('CAPTURE: ctx.drawImage() complete');
+
+            self._dbgStage(3, 'Canvas drawn — ' + canvas.width + 'x' + canvas.height + ' px', 'ok');
+            self._dbgAddImage(canvas, 'Full frame (' + vw + 'x' + vh + ')');
+
+            // Stage 4: Compute scan-box crop coordinates
+            var overlay = document.querySelector('.us-cam-overlay');
+            var dispW   = overlay ? overlay.clientWidth  : video.clientWidth;
+            var dispH   = overlay ? overlay.clientHeight : video.clientHeight;
+            var scaleX  = vw / dispW;
+            var scaleY  = vh / dispH;
+
+            var boxW_d = dispW * 0.70, boxH_d = dispH * 0.38;
+            var boxX_d = (dispW - boxW_d) / 2;
+            var boxY_d = (dispH - boxH_d) / 2;
+
+            var cropX = Math.max(0, Math.min(Math.round(boxX_d * scaleX), vw - 1));
+            var cropY = Math.max(0, Math.min(Math.round(boxY_d * scaleY), vh - 1));
+            var cropW = Math.min(Math.round(boxW_d * scaleX), vw - cropX);
+            var cropH = Math.min(Math.round(boxH_d * scaleY), vh - cropY);
+
+            self._dbgStage(4, 'Scan-box crop: ' + cropW + 'x' + cropH + ' px at (' + cropX + ',' + cropY + ')', 'ok');
+            console.log('CAPTURE: scan-box crop', cropW, 'x', cropH, 'at', cropX, cropY);
+
+            var cropCanvas = document.createElement('canvas');
+            cropCanvas.width  = cropW;
+            cropCanvas.height = cropH;
+            cropCanvas.getContext('2d').drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+            self._dbgAddImage(cropCanvas, 'Scan box (' + cropW + 'x' + cropH + ')');
+
+            console.log('CAPTURE: frame captured successfully — handing off to decode pipeline');
+            self._dbgStage(5, 'Frame captured — starting barcode decoder…', 'info');
+            self._captureSetBusy(true, '⏳ Decoding EAN barcode…');
+
+            // Hand off to decode pipeline in a fresh task tick so the browser
+            // can paint the status text and debug panel BEFORE the heavy
+            // pixel-processing loop blocks the main thread.
+            var capturedCanvas = canvas;
+            var capturedCrop   = cropCanvas;
+            setTimeout(function () {
+                try {
+                    self._processScanPipeline(capturedCanvas, capturedCrop);
+                } catch (ex) {
+                    console.error('CAPTURE: _processScanPipeline threw', ex);
+                    self._dbgStage(5, 'EXCEPTION in decode pipeline: ' + (ex && ex.message || String(ex)), 'fail');
+                    self._captureSetBusy(false, '❌ Decode pipeline error. Check browser console.');
+                    self.state.isCapturing = false;
+                }
+            }, 0);
+
+        } catch (ex) {
+            // Any synchronous error in the capture path
+            console.error('CAPTURE: synchronous exception', ex);
+            self._dbgStage(2, 'EXCEPTION: ' + (ex && ex.message || String(ex)), 'fail');
+            self._captureSetBusy(false, '❌ Capture failed: ' + (ex && ex.message || 'Unknown error'));
+            this.state.isCapturing = false;
+        }
+        // Note: isCapturing = false is set by _processScanPipeline’s
+        // terminal paths (_captureReset / _onCaptureResult)
     },
 
     // Static image file test mode
@@ -1512,59 +1588,114 @@ UniversalScanner.prototype = {
     },
 
     // Stages 4 through 8: Barcode localization, preprocessing, EAN-13 decoding, checksum validation
+    // Runs in a setTimeout(0) context so the browser can paint debug text
+    // before the synchronous pixel loops run.
     _processScanPipeline: function (fullCanvas, scanBoxCanvas) {
         var self = this;
 
-        // Stage 4: Barcode candidate localization
-        var locResult = self._localizeBarcode(scanBoxCanvas);
+        console.log('PIPELINE: starting _processScanPipeline');
+
+        // Stage 4: Barcode candidate localization (wrapped in try/catch)
+        var locResult;
+        try {
+            self._captureSetBusy(true, '⏳ Localizing barcode region…');
+            self._dbgStage(4, 'Localizing barcode region…', 'info');
+            locResult = self._localizeBarcode(scanBoxCanvas);
+            console.log('PIPELINE: localization done, bbox=', locResult.bbox);
+        } catch (ex) {
+            console.error('PIPELINE: _localizeBarcode threw', ex);
+            locResult = { canvas: scanBoxCanvas, bbox: [0, 0, scanBoxCanvas.width, scanBoxCanvas.height] };
+        }
+
         var tightCanvas = locResult.canvas;
         var bbox = locResult.bbox;
-        self._dbgStage(4, 'Barcode candidate detected at box [' + bbox.join(', ') + ']', 'ok');
+        self._dbgStage(4, 'Barcode candidate: [' + bbox.join(', ') + '] — tight crop: ' + tightCanvas.width + 'x' + tightCanvas.height, 'ok');
 
-        // Stage 5: Tight barcode crop
-        self._dbgStage(5, 'Tight barcode crop created: ' + tightCanvas.width + 'x' + tightCanvas.height + ' px', 'ok');
+        // Stage 5: Show tight crop thumbnail
+        self._dbgStage(5, 'Tight barcode crop: ' + tightCanvas.width + 'x' + tightCanvas.height + ' px', 'ok');
         self._dbgAddImage(tightCanvas, 'Tight crop (' + tightCanvas.width + 'x' + tightCanvas.height + ')');
 
-        // Stage 6: Generated 6 preprocessing variants
-        var variants = self._generatePreprocessingVariants(tightCanvas);
-        self._dbgStage(6, 'Generated ' + variants.length + ' preprocessing variants', 'ok');
+        // Yield to browser before the heavy variant generation loop
+        self._captureSetBusy(true, '⏳ Generating preprocessing variants…');
+        setTimeout(function () {
+            // Stage 6: Generate preprocessing variants (wrapped in try/catch)
+            var variants;
+            try {
+                variants = self._generatePreprocessingVariants(tightCanvas);
+                console.log('PIPELINE: generated', variants.length, 'preprocessing variants');
+                self._dbgStage(6, 'Generated ' + variants.length + ' preprocessing variants', 'ok');
+            } catch (ex) {
+                console.error('PIPELINE: _generatePreprocessingVariants threw', ex);
+                self._dbgStage(6, 'Variant generation failed (' + (ex && ex.message || String(ex)) + ') — will try raw canvases', 'fail');
+                variants = [];
+            }
 
-        // Add preprocessed variant thumbnails to debug panel
-        variants.forEach(function (v) {
-            self._dbgAddImage(v.canvas, v.label);
-        });
+            // Add preprocessed variant thumbnails
+            variants.forEach(function (v) { self._dbgAddImage(v.canvas, v.label); });
 
-        // Stage 7: EAN-13 decoder attempts
-        self._dbgStage(7, 'Trying EAN-13 / EAN-8 decoding across preprocessed variants…', 'info');
-        $('#us-cam-status').text('⏳ Running EAN-13 decoding pipeline…');
+            // Stage 7: Start decoder
+            self._dbgStage(7, 'Starting EAN-13 / EAN-8 decoder…', 'info');
+            self._captureSetBusy(true, '⏳ Running EAN-13 decode…');
+            console.log('PIPELINE: handing off to ZXing decoder');
 
-        // Run multi-variant ZXing decode
-        self._decodeVariantsWithZxing(fullCanvas, scanBoxCanvas, tightCanvas, variants);
+            // Yield again before ZXing (which loads a CDN script)
+            setTimeout(function () {
+                self._decodeVariantsWithZxing(fullCanvas, scanBoxCanvas, tightCanvas, variants);
+            }, 0);
+        }, 0);
     },
 
     // Execute ZXing decoding against all preprocessed variants & crops
+    // Protected by a 5-second timeout on library loading.
     _decodeVariantsWithZxing: function (fullCanvas, scanBoxCanvas, tightCanvas, variants) {
         var self = this;
 
+        var TIMEOUT_MS = 5000;
+        var timedOut = false;
+        var zxingTimer = setTimeout(function () {
+            timedOut = true;
+            console.error('PIPELINE: ZXing load timed out after', TIMEOUT_MS, 'ms — trying html5-qrcode fallback');
+            self._dbgStage(7, 'ZXing library load timed out (' + TIMEOUT_MS + 'ms) — falling back to html5-qrcode', 'fail');
+            self._fallbackVariantsHtml5Qrcode(fullCanvas, scanBoxCanvas, tightCanvas, variants);
+        }, TIMEOUT_MS);
+
         self._loadZxing(function (err) {
+            if (timedOut) return; // Already handled by timeout
+            clearTimeout(zxingTimer);
+
             if (err || !window.ZXing) {
-                self._dbgStage(7, 'ZXing decoder unavailable — running html5-qrcode fallback', 'fail');
+                console.warn('PIPELINE: ZXing load failed —', err ? err.message : 'ZXing undefined');
+                self._dbgStage(7, 'ZXing unavailable — using html5-qrcode fallback', 'fail');
                 self._fallbackVariantsHtml5Qrcode(fullCanvas, scanBoxCanvas, tightCanvas, variants);
                 return;
             }
 
-            var hints = new Map();
-            hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-                ZXing.BarcodeFormat.EAN_13,
-                ZXing.BarcodeFormat.EAN_8,
-                ZXing.BarcodeFormat.UPC_A,
-                ZXing.BarcodeFormat.UPC_E,
-                ZXing.BarcodeFormat.CODE_128
-            ]);
-            hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+            console.log('PIPELINE: ZXing loaded, running decode passes');
 
-            var reader = new ZXing.MultiFormatReader();
-            reader.setHints(hints);
+            var hints = new Map();
+            try {
+                hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+                    ZXing.BarcodeFormat.EAN_13,
+                    ZXing.BarcodeFormat.EAN_8,
+                    ZXing.BarcodeFormat.UPC_A,
+                    ZXing.BarcodeFormat.UPC_E,
+                    ZXing.BarcodeFormat.CODE_128
+                ]);
+                hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+            } catch (ex) {
+                console.error('PIPELINE: ZXing hints setup threw', ex);
+            }
+
+            var reader;
+            try {
+                reader = new ZXing.MultiFormatReader();
+                reader.setHints(hints);
+            } catch (ex) {
+                console.error('PIPELINE: ZXing MultiFormatReader init threw', ex);
+                self._dbgStage(7, 'ZXing reader init failed — html5-qrcode fallback', 'fail');
+                self._fallbackVariantsHtml5Qrcode(fullCanvas, scanBoxCanvas, tightCanvas, variants);
+                return;
+            }
 
             function tryZxing(c) {
                 try {
@@ -1578,83 +1709,133 @@ UniversalScanner.prototype = {
                 }
             }
 
-            // List of canvases to attempt in priority order
+            // Build decode target list: preprocessed variants first, then raw crops
             var targets = [];
             variants.forEach(function (v) {
                 targets.push({ canvas: v.canvas, name: 'Variant: ' + v.label });
             });
             targets.push({ canvas: tightCanvas, name: 'Tight Crop' });
-            targets.push({ canvas: scanBoxCanvas, name: 'Scan Box Crop' });
+            targets.push({ canvas: scanBoxCanvas, name: 'Scan Box' });
             targets.push({ canvas: fullCanvas, name: 'Full Frame' });
 
+            var decoded = null;
             for (var k = 0; k < targets.length; k++) {
                 var t = targets[k];
-                var raw = tryZxing(t.canvas);
-                if (raw) {
-                    self._dbgStage(7, 'ZXing succeeded on ' + t.name + ' → "' + raw + '"', 'ok');
-                    self._onCaptureResult(raw);
+                console.log('PIPELINE: ZXing trying', t.name);
+                decoded = tryZxing(t.canvas);
+                if (decoded) {
+                    console.log('PIPELINE: ZXing success on', t.name, '→', decoded);
+                    self._dbgStage(7, 'ZXing decoded on ' + t.name + ' → "' + decoded + '"', 'ok');
+                    self._onCaptureResult(decoded);
                     return;
                 }
             }
 
-            self._dbgStage(7, 'ZXing passes completed (no result) — checking html5-qrcode fallback', 'fail');
+            console.log('PIPELINE: ZXing found nothing — trying html5-qrcode fallback');
+            self._dbgStage(7, 'ZXing: no result on any target — html5-qrcode fallback', 'fail');
             self._fallbackVariantsHtml5Qrcode(fullCanvas, scanBoxCanvas, tightCanvas, variants);
         });
     },
 
     // Fallback: html5-qrcode scanFile against localized & preprocessed targets
+    // Has an 8-second outer timeout so toBlob/scanFile hangs never leave the button stuck.
     _fallbackVariantsHtml5Qrcode: function (fullCanvas, scanBoxCanvas, tightCanvas, variants) {
         var self = this;
 
+        // ── 8-second hard timeout ──────────────────────────────────────────────
+        var fbTimedOut = false;
+        var fbTimer = setTimeout(function () {
+            fbTimedOut = true;
+            console.error('FALLBACK: html5-qrcode timed out after 8s');
+            self._dbgStage(8, 'FAIL — html5-qrcode fallback timed out (8s)', 'fail');
+            self._captureReset('❌ Barcode decode timed out. Check the tight crop thumbnails and try again.');
+        }, 8000);
+
+        function done(msg) {
+            if (fbTimedOut) return; // already handled
+            clearTimeout(fbTimer);
+            self._captureReset(msg);
+        }
+
         self._loadHtml5QrcodeLibrary(function () {
+            if (fbTimedOut) return;
+
             if (!window.Html5Qrcode) {
+                console.error('FALLBACK: Html5Qrcode library unavailable');
                 self._dbgStage(7, 'html5-qrcode fallback unavailable', 'fail');
-                self._dbgStage(8, 'FAIL — Could not decode EAN barcode from any variant', 'fail');
-                self._captureReset('❌ Could not decode EAN barcode. Check the tight crop thumbnails in the debug panel.');
+                self._dbgStage(8, 'FAIL — All decoders exhausted. Could not decode EAN barcode.', 'fail');
+                done('❌ Could not decode EAN barcode. Check the tight crop thumbnails in the debug panel.');
                 return;
             }
 
-            var targets = [
-                { canvas: tightCanvas, name: 'fallback tight crop' },
-                { canvas: variants[1].canvas, name: 'fallback high contrast' },
-                { canvas: variants[2].canvas, name: 'fallback Otsu binary' },
-                { canvas: scanBoxCanvas, name: 'fallback scan box' }
-            ];
+            // Build target list — guard against empty variants array
+            var targets = [];
+            if (tightCanvas) targets.push({ canvas: tightCanvas, name: 'fallback tight crop' });
+            if (variants && variants[1]) targets.push({ canvas: variants[1].canvas, name: 'fallback high contrast' });
+            if (variants && variants[2]) targets.push({ canvas: variants[2].canvas, name: 'fallback Otsu binary' });
+            if (scanBoxCanvas) targets.push({ canvas: scanBoxCanvas, name: 'fallback scan box' });
+            if (fullCanvas) targets.push({ canvas: fullCanvas, name: 'fallback full frame' });
+
+            if (targets.length === 0) {
+                self._dbgStage(8, 'FAIL — No canvas targets available for fallback', 'fail');
+                done('❌ Could not decode EAN barcode — no valid canvas targets.');
+                return;
+            }
 
             function tryNextFallback(idx) {
+                if (fbTimedOut) return;
                 if (idx >= targets.length) {
-                    self._dbgStage(7, 'html5-qrcode fallback passes exhausted', 'fail');
-                    self._dbgStage(8, 'FAIL — Could not decode EAN barcode from any variant', 'fail');
-                    self._captureReset('❌ Could not decode EAN barcode. Inspect the tight crop thumbnails in the debug panel below.');
+                    console.log('FALLBACK: all html5-qrcode passes exhausted');
+                    self._dbgStage(7, 'html5-qrcode fallback: all passes exhausted', 'fail');
+                    self._dbgStage(8, 'FAIL — Could not decode EAN barcode from any variant.', 'fail');
+                    done('❌ Could not decode EAN barcode. Inspect the tight crop thumbnails in the debug panel.');
                     return;
                 }
-                var item = targets[idx];
-                item.canvas.toBlob(function (blob) {
-                    if (!blob) { tryNextFallback(idx + 1); return; }
-                    var file = new File([blob], 'scan.jpg', { type: 'image/jpeg' });
-                    var tid  = 'us-qr-tmp-' + Date.now();
-                    var div  = document.createElement('div');
-                    div.id   = tid;
-                    div.style.display = 'none';
-                    document.body.appendChild(div);
 
-                    var sc = new Html5Qrcode(tid);
-                    sc.scanFile(file, false)
-                        .then(function (txt) {
-                            document.body.removeChild(div);
-                            var raw = String(txt || '').trim();
-                            if (raw) {
-                                self._dbgStage(7, 'html5-qrcode succeeded on ' + item.name + ' → "' + raw + '"', 'ok');
-                                self._onCaptureResult(raw);
-                            } else {
-                                tryNextFallback(idx + 1);
-                            }
-                        })
-                        .catch(function () {
-                            document.body.removeChild(div);
+                var item = targets[idx];
+                console.log('FALLBACK: trying html5-qrcode on', item.name);
+
+                try {
+                    item.canvas.toBlob(function (blob) {
+                        if (fbTimedOut) return;
+                        if (!blob) {
+                            console.warn('FALLBACK: toBlob returned null for', item.name);
                             tryNextFallback(idx + 1);
-                        });
-                }, 'image/jpeg', 0.97);
+                            return;
+                        }
+                        var file = new File([blob], 'scan.jpg', { type: 'image/jpeg' });
+                        var tid  = 'us-qr-tmp-' + Date.now();
+                        var div  = document.createElement('div');
+                        div.id   = tid;
+                        div.style.display = 'none';
+                        document.body.appendChild(div);
+
+                        var sc = new Html5Qrcode(tid);
+                        sc.scanFile(file, false)
+                            .then(function (txt) {
+                                if (fbTimedOut) return;
+                                try { document.body.removeChild(div); } catch (e) {}
+                                var raw = String(txt || '').trim();
+                                if (raw) {
+                                    console.log('FALLBACK: html5-qrcode success on', item.name, '→', raw);
+                                    self._dbgStage(7, 'html5-qrcode decoded on ' + item.name + ' → "' + raw + '"', 'ok');
+                                    clearTimeout(fbTimer);
+                                    self._onCaptureResult(raw);
+                                } else {
+                                    tryNextFallback(idx + 1);
+                                }
+                            })
+                            .catch(function (err) {
+                                if (fbTimedOut) return;
+                                try { document.body.removeChild(div); } catch (e) {}
+                                console.warn('FALLBACK: html5-qrcode scanFile rejected for', item.name, err);
+                                tryNextFallback(idx + 1);
+                            });
+                    }, 'image/jpeg', 0.97);
+                } catch (ex) {
+                    console.error('FALLBACK: toBlob threw for', item.name, ex);
+                    tryNextFallback(idx + 1);
+                }
             }
 
             tryNextFallback(0);
@@ -1713,9 +1894,11 @@ UniversalScanner.prototype = {
     },
 
     // Re-enable capture button and update status text
+    // Also clears the isCapturing guard so the next click is accepted.
     _captureReset: function (msg) {
-        $('#us-capture-btn').prop('disabled', false);
-        $('#us-cam-status').text(msg || '🎯 Position EAN barcode inside the frame, then tap Capture');
+        this.state.isCapturing = false;
+        console.log('CAPTURE: _captureReset —', msg);
+        this._captureSetBusy(false, msg || '🎯 Position EAN barcode inside the frame, then tap Capture');
     },
 
     _stopCamera: function () {
