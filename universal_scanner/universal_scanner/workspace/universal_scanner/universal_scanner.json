@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"id\":\"us-hdr-scanning\",\"type\":\"header\",\"data\":{\"text\":\"Scanning\",\"col\":12}},{\"id\":\"us-sc-scanner\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Product Scanner\",\"col\":3}},{\"id\":\"us-hdr-sessions\",\"type\":\"header\",\"data\":{\"text\":\"Scan Sessions\",\"col\":12}},{\"id\":\"us-sc-session\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Scan Session\",\"col\":3}},{\"id\":\"us-sc-log\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Product Scan Log\",\"col\":3}},{\"id\":\"us-hdr-reports\",\"type\":\"header\",\"data\":{\"text\":\"Scan Reports\",\"col\":12}},{\"id\":\"us-sc-log-report\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Product Scan Log List\",\"col\":3}},{\"id\":\"us-sc-session-report\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Scan Session List\",\"col\":3}}]",
+ "content": "[{\"id\":\"us-hdr-scanning\",\"type\":\"header\",\"data\":{\"text\":\"Scanning\",\"col\":12}},{\"id\":\"us-sc-scanner\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Product Scanner\",\"col\":3}},{\"id\":\"us-hdr-sessions\",\"type\":\"header\",\"data\":{\"text\":\"Scan Sessions\",\"col\":12}},{\"id\":\"us-sc-session\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Scan Session\",\"col\":3}},{\"id\":\"us-hdr-reports\",\"type\":\"header\",\"data\":{\"text\":\"Scan Reports\",\"col\":12}},{\"id\":\"us-sc-report\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Scan Session Report\",\"col\":3}}]",
  "creation": "2026-08-13 00:00:00.000000",
  "doctype": "Workspace",
  "hide_custom": 0,
@@ -35,24 +35,10 @@
   },
   {
    "color": "Green",
-   "format": "{} Logs",
-   "label": "Product Scan Log",
-   "link_to": "Product Scan Log",
-   "stats_filter": "{}",
-   "type": "DocType",
-   "icon": "fa fa-list"
-  },
-  {
-   "label": "Product Scan Log List",
-   "link_to": "Product Scan Log",
-   "type": "DocType",
-   "icon": "fa fa-file-text-o"
-  },
-  {
-   "label": "Scan Session List",
-   "link_to": "Scan Session",
-   "type": "DocType",
-   "icon": "fa fa-folder-open-o"
+   "label": "Scan Session Report",
+   "link_to": "Scan Session Report",
+   "type": "Report",
+   "icon": "fa fa-bar-chart"
   }
  ],
  "title": "Universal Scanner"

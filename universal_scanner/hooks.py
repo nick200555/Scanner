@@ -33,6 +33,10 @@ fixtures = [
         "dt": "Workspace",
         "filters": [["name", "in", ["Universal Scanner"]]],
     },
+    {
+        "dt": "Report",
+        "filters": [["name", "in", ["Scan Session Report"]]],
+    },
 ]
 
 # ─── Document Events ──────────────────────────────────────────────────────────
