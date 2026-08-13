@@ -378,6 +378,37 @@ UniversalScanner.prototype = {
     letter-spacing: 0.2px;\
 }\
 \
+/* ── Camera debug preview panel ── */\
+#us-debug-panel {\
+    background: rgba(0,0,0,0.85);\
+    border-radius: 0 0 10px 10px;\
+    padding: 10px 12px;\
+    border-top: 1px solid rgba(255,255,255,0.1);\
+    font-size: 11px; font-family: monospace;\
+    color: rgba(255,255,255,0.8);\
+    display: none;\
+}\
+#us-debug-panel.us-dbg-visible { display: block; }\
+.us-dbg-title {\
+    font-size: 10px; font-weight: 700; text-transform: uppercase;\
+    letter-spacing: 1px; color: rgba(99,102,241,0.9); margin-bottom: 6px;\
+}\
+.us-dbg-stage { margin: 2px 0; }\
+.us-dbg-ok   { color: #10b981; }\
+.us-dbg-fail { color: #ef4444; }\
+.us-dbg-info { color: rgba(255,255,255,0.6); }\
+.us-dbg-imgs {\
+    display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;\
+}\
+.us-dbg-img-wrap {\
+    display: flex; flex-direction: column; align-items: center; gap: 3px;\
+}\
+.us-dbg-img-wrap img {\
+    border: 1px solid rgba(255,255,255,0.2);\
+    border-radius: 4px; max-height: 80px; max-width: 120px;\
+    object-fit: contain; background: #000;\
+}\
+.us-dbg-img-label { font-size: 9px; color: rgba(255,255,255,0.5); }\
 .us-feedback {\
     margin-top: 12px; min-height: 28px;\
     display: flex; align-items: center; gap: 8px;\
@@ -644,6 +675,12 @@ UniversalScanner.prototype = {
                 '</div>' +
                 /* Hidden canvas for frame grabbing */
                 '<canvas id="us-capture-canvas"></canvas>' +
+                /* Debug preview panel — shows captured/cropped frames + stage log */
+                '<div id="us-debug-panel">' +
+                  '<div class="us-dbg-title">📋 Decode Debug</div>' +
+                  '<div id="us-dbg-stages"></div>' +
+                  '<div class="us-dbg-imgs" id="us-dbg-imgs"></div>' +
+                '</div>' +
               '</div>' +
 
               '<div class="us-input-wrapper" id="us-input-wrapper">' +
@@ -793,18 +830,19 @@ UniversalScanner.prototype = {
 
     // ─── Camera Barcode Scanner ───────────────────────────────────────────────
     //
-    // Architecture: explicit Capture & Scan workflow.
+    // Decoding library: ZXing-js  (@zxing/library UMD, via unpkg CDN)
+    //   - Reliable EAN-13 / EAN-8 decoding from canvas/image elements
+    //   - Fallback to html5-qrcode scanFile() when ZXing fails
     //
-    //   1. _startCamera()      — opens getUserMedia video stream → shows preview
-    //   2. _captureAndScan()   — captures a single frame from the live video
-    //                           into a hidden <canvas>, then decodes the EAN
-    //                           using BarcodeDetector (native) or html5-qrcode
-    //                           scanFile() (fallback). Validates 8/13-digit EAN.
-    //                           Populates barcode input. Calls _handleScan().
-    //   3. _stopCamera()       — stops MediaStream tracks, hides preview.
+    // Three-pass decode strategy:
+    //   Pass 1  — full captured video frame
+    //   Pass 2  — cropped scan-box region (correctly scaled from display→video px)
+    //   Pass 3  — 3× upscaled crop (improves success on small barcodes)
     //
-    // The user controls WHEN the frame is captured (the big button).
-    // No continuous auto-scan loop is used.
+    // Debug panel shows:
+    //   - Per-stage status log
+    //   - Thumbnail of the captured frame
+    //   - Thumbnail of the cropped region
     // ──────────────────────────────────────────────────────────────────────────
 
     _toggleCamera: function () {
@@ -815,35 +853,40 @@ UniversalScanner.prototype = {
         }
     },
 
+    // Load ZXing-js from CDN (primary decoder, best EAN-13/8 support)
+    _loadZxing: function (callback) {
+        if (window.ZXing) { callback(null); return; }
+        var s = document.createElement('script');
+        s.src = 'https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js';
+        s.onload  = function () { callback(null); };
+        s.onerror = function () { callback(new Error('ZXing CDN failed')); };
+        document.head.appendChild(s);
+    },
+
+    // Load html5-qrcode as secondary fallback
     _loadHtml5QrcodeLibrary: function (callback) {
-        if (window.Html5Qrcode) {
-            callback();
-            return;
-        }
-        var script = document.createElement('script');
-        script.src = 'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';
-        script.onload = callback;
-        script.onerror = function () {
-            // Library failed to load — BarcodeDetector fallback may still work
-            callback();
-        };
-        document.head.appendChild(script);
+        if (window.Html5Qrcode) { callback(); return; }
+        var s = document.createElement('script');
+        s.src = 'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';
+        s.onload  = callback;
+        s.onerror = callback; // continue even if it fails
+        document.head.appendChild(s);
     },
 
     _startCamera: function () {
         var self = this;
 
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            frappe.msgprint(__('Camera not supported in this browser. Please use Chrome or Safari on a mobile device.'));
+            frappe.msgprint(__('Camera not supported. Use Chrome on Android or desktop.'));
             return;
         }
 
-        // Prefer rear camera on mobile; fall back to any camera
+        // Request high resolution for accurate barcode decoding
         var constraints = {
             video: {
                 facingMode: { ideal: 'environment' },
-                width: { ideal: 1280 },
-                height: { ideal: 720 }
+                width:  { ideal: 1920 },
+                height: { ideal: 1080 }
             },
             audio: false
         };
@@ -855,23 +898,36 @@ UniversalScanner.prototype = {
 
                 var video = document.getElementById('us-camera-video');
                 video.srcObject = stream;
-                video.play();
+                video.play().then(function () {
+                    // Log actual camera resolution
+                    var track = stream.getVideoTracks()[0];
+                    if (track) {
+                        var s = track.getSettings();
+                        console.log('[Camera] track settings:', s);
+                        console.log('[Camera] video dimensions:', video.videoWidth, 'x', video.videoHeight);
+                    }
+                }).catch(function () {});
 
                 $('#us-camera-wrapper').show();
                 $('#us-cam-btn').addClass('us-cam-stop').html('📷 Camera Active');
                 $('#us-capture-btn').prop('disabled', false);
                 $('#us-cam-status').text('🎯 Position EAN barcode inside the frame, then tap Capture');
+                $('#us-debug-panel').removeClass('us-dbg-visible');
 
-                // Load html5-qrcode as fallback for browsers without BarcodeDetector
-                self._loadHtml5QrcodeLibrary(function () { /* pre-warm */ });
+                // Pre-load both decoders
+                self._loadZxing(function () {});
+                self._loadHtml5QrcodeLibrary(function () {});
             })
             .catch(function (err) {
                 var msg = (err && (err.message || String(err))) || 'Permission denied';
-                frappe.msgprint(__('Camera access error: {0}. Grant camera permission and try again.', [msg]));
+                frappe.msgprint(__('Camera error: {0}. Grant camera permission and try again.', [msg]));
             });
     },
 
-    // Capture current video frame → decode EAN → populate input → scan
+    // ────────────────────────────────────────────────────────────────
+    // _captureAndScan: main entry point
+    // Stages 1–9 are logged to the debug panel.
+    // ────────────────────────────────────────────────────────────────
     _captureAndScan: function () {
         var self = this;
 
@@ -879,181 +935,322 @@ UniversalScanner.prototype = {
             frappe.msgprint(__('Camera is not active. Click "📷 Start Camera" first.'));
             return;
         }
-        if (this.state.isProcessing) {
-            return;
-        }
+        if (this.state.isProcessing) { return; }
+
+        // ── Reset debug panel
+        $('#us-dbg-stages').html('');
+        $('#us-dbg-imgs').html('');
+        $('#us-debug-panel').addClass('us-dbg-visible');
+        $('#us-capture-btn').prop('disabled', true);
+        $('#us-cam-status').text('⏳ Capturing frame…');
 
         var video  = document.getElementById('us-camera-video');
         var canvas = document.getElementById('us-capture-canvas');
 
-        // Size canvas to match the video frame
-        var vw = video.videoWidth  || 640;
-        var vh = video.videoHeight || 480;
+        // ── STAGE 1: Capture video frame ──────────────────────────────────────────
+        var vw = video.videoWidth;
+        var vh = video.videoHeight;
+        self._dbgStage(1, 'Camera frame captured', 'info',
+            'video.videoWidth=' + vw + ' video.videoHeight=' + vh +
+            ' | display=' + video.clientWidth + 'x' + video.clientHeight);
+
+        if (!vw || !vh) {
+            self._dbgStage(1, 'FAIL — video dimensions are 0. Camera not ready.', 'fail');
+            self._captureReset('Camera not ready. Wait for the preview to load fully.');
+            return;
+        }
+
+        // Draw full video frame to canvas at native resolution
         canvas.width  = vw;
         canvas.height = vh;
-
         var ctx = canvas.getContext('2d');
         ctx.drawImage(video, 0, 0, vw, vh);
 
-        $('#us-capture-btn').prop('disabled', true);
-        $('#us-cam-status').text('⏳ Decoding barcode…');
+        // ── STAGE 2: Captured frame dimensions
+        self._dbgStage(2, 'Canvas drawn — ' + canvas.width + 'x' + canvas.height + ' px', 'ok');
 
-        // ── Strategy 1: Native BarcodeDetector (Chrome 83+, Edge, Android Chrome)
-        if (window.BarcodeDetector) {
-            var detector = new BarcodeDetector({
-                formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39']
-            });
-            detector.detect(canvas)
-                .then(function (barcodes) {
-                    if (!barcodes || barcodes.length === 0) {
-                        self._onCaptureNoResult();
-                        return;
-                    }
-                    // BarcodeDetector.rawValue is the decoded string
-                    var raw = String(barcodes[0].rawValue || '').trim();
-                    self._onCaptureResult(raw);
-                })
-                .catch(function (err) {
-                    // BarcodeDetector failed — fall through to html5-qrcode
-                    self._captureWithHtml5Qrcode(canvas, vw, vh);
-                });
-            return;
-        }
+        // Show thumbnail of the captured frame
+        self._dbgAddImage(canvas, 'Full frame');
 
-        // ── Strategy 2: html5-qrcode scanFile() fallback
-        self._captureWithHtml5Qrcode(canvas, vw, vh);
+        // ── Compute cropped scan-box region in VIDEO pixel coordinates ────────
+        //
+        // The .us-cam-overlay::after pseudo-element creates a centred rectangle
+        //   70% wide × 38% tall of the DISPLAYED overlay element.
+        // We must scale from display→video pixels:
+        //   scaleX = videoWidth  / displayedWidth
+        //   scaleY = videoHeight / displayedHeight
+        //
+        var overlay   = document.querySelector('.us-cam-overlay');
+        var dispW     = overlay ? overlay.clientWidth  : video.clientWidth;
+        var dispH     = overlay ? overlay.clientHeight : video.clientHeight;
+        var scaleX    = vw / dispW;
+        var scaleY    = vh / dispH;
+
+        var boxW_disp = dispW * 0.70;
+        var boxH_disp = dispH * 0.38;
+        var boxX_disp = (dispW - boxW_disp) / 2;
+        var boxY_disp = (dispH - boxH_disp) / 2;
+
+        // Convert to video pixel coordinates
+        var cropX = Math.round(boxX_disp * scaleX);
+        var cropY = Math.round(boxY_disp * scaleY);
+        var cropW = Math.round(boxW_disp * scaleX);
+        var cropH = Math.round(boxH_disp * scaleY);
+
+        // Safety: clamp to canvas bounds
+        cropX = Math.max(0, Math.min(cropX, vw - 1));
+        cropY = Math.max(0, Math.min(cropY, vh - 1));
+        cropW = Math.min(cropW, vw - cropX);
+        cropH = Math.min(cropH, vh - cropY);
+
+        // ── STAGE 3: Scan region cropped
+        self._dbgStage(3,
+            'Scan-box crop (video px): x=' + cropX + ' y=' + cropY +
+            ' w=' + cropW + ' h=' + cropH +
+            ' | scaleX=' + scaleX.toFixed(2) + ' scaleY=' + scaleY.toFixed(2),
+            'ok');
+
+        // Build cropped canvas
+        var cropCanvas = document.createElement('canvas');
+        cropCanvas.width  = cropW;
+        cropCanvas.height = cropH;
+        var cropCtx = cropCanvas.getContext('2d');
+        cropCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+        self._dbgAddImage(cropCanvas, 'Cropped box');
+
+        // Build 3× upscaled crop canvas
+        var scale3 = 3;
+        var bigCanvas = document.createElement('canvas');
+        bigCanvas.width  = cropW * scale3;
+        bigCanvas.height = cropH * scale3;
+        var bigCtx = bigCanvas.getContext('2d');
+        bigCtx.imageSmoothingEnabled = false;
+        bigCtx.drawImage(cropCanvas, 0, 0, bigCanvas.width, bigCanvas.height);
+        self._dbgAddImage(bigCanvas, 'Crop ×' + scale3);
+
+        // ── STAGE 4: Decoder receives image
+        self._dbgStage(4, 'Sending to ZXing decoder…', 'info');
+        $('#us-cam-status').text('⏳ Decoding EAN… (3 attempts)');
+
+        // Run the three-pass ZXing decode sequence
+        self._decodeWithZxing(canvas, cropCanvas, bigCanvas);
     },
 
-    // Decode canvas frame using html5-qrcode scanFile API
-    _captureWithHtml5Qrcode: function (canvas, vw, vh) {
+    // ────────────────────────────────────────────────────────────────
+    // _decodeWithZxing: load ZXing then attempt 3 passes in sequence
+    // ────────────────────────────────────────────────────────────────
+    _decodeWithZxing: function (fullCanvas, cropCanvas, bigCanvas) {
         var self = this;
 
-        if (!window.Html5Qrcode) {
-            self._onCaptureNoResult();
-            return;
-        }
-
-        // Convert canvas to Blob then File for Html5Qrcode.scanFile()
-        canvas.toBlob(function (blob) {
-            if (!blob) {
-                self._onCaptureNoResult();
+        self._loadZxing(function (err) {
+            if (err || !window.ZXing) {
+                self._dbgStage(4, 'ZXing failed to load: ' + (err ? err.message : 'library undefined') + ' — trying html5-qrcode fallback', 'fail');
+                self._fallbackHtml5Qrcode(fullCanvas, cropCanvas, bigCanvas);
                 return;
             }
-            var file = new File([blob], 'capture.jpg', { type: 'image/jpeg' });
 
-            // Create a temporary off-screen element for the scanner instance
-            var tempId = 'us-qr-temp-' + Date.now();
-            var tempDiv = document.createElement('div');
-            tempDiv.id = tempId;
-            tempDiv.style.display = 'none';
-            document.body.appendChild(tempDiv);
+            // Create a MultiFormatReader configured for EAN-13 and EAN-8
+            var hints = new Map();
+            hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+                ZXing.BarcodeFormat.EAN_13,
+                ZXing.BarcodeFormat.EAN_8,
+                ZXing.BarcodeFormat.UPC_A,
+                ZXing.BarcodeFormat.UPC_E,
+                ZXing.BarcodeFormat.CODE_128
+            ]);
+            hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
 
-            var scanner = new Html5Qrcode(tempId);
-            scanner.scanFile(file, false)
-                .then(function (decodedText) {
-                    document.body.removeChild(tempDiv);
-                    var raw = String(decodedText || '').trim();
-                    self._onCaptureResult(raw);
-                })
-                .catch(function (err) {
-                    document.body.removeChild(tempDiv);
-                    self._onCaptureNoResult();
-                });
-        }, 'image/jpeg', 0.95);
+            var reader = new ZXing.MultiFormatReader();
+            reader.setHints(hints);
+
+            // ── Helper: decode a single canvas with ZXing
+            function zxingDecodeCanvas(c) {
+                try {
+                    var imageData = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+                    var luminance = new ZXing.RGBLuminanceSource(imageData.data, c.width, c.height);
+                    var binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminance));
+                    var result = reader.decode(binaryBitmap);
+                    return result ? String(result.getText()).trim() : null;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            // ── Pass 1: full frame
+            self._dbgStage(4, 'Pass 1 — full frame (' + fullCanvas.width + 'x' + fullCanvas.height + ')', 'info');
+            var r1 = zxingDecodeCanvas(fullCanvas);
+            if (r1) {
+                self._dbgStage(5, 'EAN decoded (Pass 1): ' + r1, 'ok');
+                self._onCaptureResult(r1);
+                return;
+            }
+            self._dbgStage(4, 'Pass 1 — no result', 'fail');
+
+            // ── Pass 2: cropped scan-box region
+            self._dbgStage(4, 'Pass 2 — cropped region (' + cropCanvas.width + 'x' + cropCanvas.height + ')', 'info');
+            var r2 = zxingDecodeCanvas(cropCanvas);
+            if (r2) {
+                self._dbgStage(5, 'EAN decoded (Pass 2 crop): ' + r2, 'ok');
+                self._onCaptureResult(r2);
+                return;
+            }
+            self._dbgStage(4, 'Pass 2 — no result', 'fail');
+
+            // ── Pass 3: 3× upscaled crop
+            self._dbgStage(4, 'Pass 3 — ' + bigCanvas.width + 'x' + bigCanvas.height + ' upscaled crop', 'info');
+            var r3 = zxingDecodeCanvas(bigCanvas);
+            if (r3) {
+                self._dbgStage(5, 'EAN decoded (Pass 3 upscaled): ' + r3, 'ok');
+                self._onCaptureResult(r3);
+                return;
+            }
+            self._dbgStage(4, 'Pass 3 — no result', 'fail');
+
+            // All ZXing passes failed — try html5-qrcode scanFile fallback
+            self._dbgStage(4, 'All ZXing passes failed — trying html5-qrcode fallback…', 'info');
+            self._fallbackHtml5Qrcode(fullCanvas, cropCanvas, bigCanvas);
+        });
     },
 
-    // Called when a decoded string arrives from either decoder
+    // html5-qrcode scanFile fallback: try 3 canvases in sequence
+    _fallbackHtml5Qrcode: function (fullCanvas, cropCanvas, bigCanvas) {
+        var self = this;
+
+        self._loadHtml5QrcodeLibrary(function () {
+            if (!window.Html5Qrcode) {
+                self._dbgStage(4, 'html5-qrcode library unavailable', 'fail');
+                self._dbgStage(5, 'FAIL — all decoders exhausted', 'fail');
+                self._captureReset('❌ All decoders failed. Check the debug panel below the camera.');
+                return;
+            }
+
+            // Try each canvas in sequence by converting to File
+            var canvases = [
+                { c: fullCanvas, label: 'fallback full frame' },
+                { c: cropCanvas, label: 'fallback crop' },
+                { c: bigCanvas,  label: 'fallback upscaled crop' }
+            ];
+
+            function tryNext(idx) {
+                if (idx >= canvases.length) {
+                    self._dbgStage(4, 'html5-qrcode: all passes failed', 'fail');
+                    self._dbgStage(5, 'FAIL — all decoders exhausted', 'fail');
+                    self._captureReset('❌ Could not decode EAN barcode. Check the cropped image in the debug panel — ensure the barcode is clear and inside the blue box.');
+                    return;
+                }
+                var item = canvases[idx];
+                self._dbgStage(4, 'html5-qrcode pass — ' + item.label, 'info');
+
+                item.c.toBlob(function (blob) {
+                    if (!blob) { tryNext(idx + 1); return; }
+                    var file = new File([blob], 'scan.jpg', { type: 'image/jpeg' });
+                    var tid  = 'us-qr-tmp-' + Date.now();
+                    var div  = document.createElement('div');
+                    div.id   = tid;
+                    div.style.display = 'none';
+                    document.body.appendChild(div);
+                    var sc = new Html5Qrcode(tid);
+                    sc.scanFile(file, false)
+                        .then(function (txt) {
+                            document.body.removeChild(div);
+                            var raw = String(txt || '').trim();
+                            if (raw) {
+                                self._dbgStage(5, 'EAN decoded (html5-qrcode ' + item.label + '): ' + raw, 'ok');
+                                self._onCaptureResult(raw);
+                            } else {
+                                tryNext(idx + 1);
+                            }
+                        })
+                        .catch(function () {
+                            document.body.removeChild(div);
+                            tryNext(idx + 1);
+                        });
+                }, 'image/jpeg', 0.97);
+            }
+            tryNext(0);
+        });
+    },
+
+    // ── Debug helpers ──────────────────────────────────────────────────────────────────
+    _dbgStage: function (n, msg, type) {
+        var cls = type === 'ok' ? 'us-dbg-ok' : type === 'fail' ? 'us-dbg-fail' : 'us-dbg-info';
+        var icon = type === 'ok' ? '✅' : type === 'fail' ? '❌' : 'ℹ';
+        var line = '<div class="us-dbg-stage ' + cls + '">' + icon + ' Stage ' + n + ': ' + msg + '</div>';
+        $('#us-dbg-stages').append(line);
+        console.log('[US Stage ' + n + '] ' + msg);
+    },
+
+    _dbgAddImage: function (canvas, label) {
+        try {
+            var url = canvas.toDataURL('image/jpeg', 0.7);
+            var wrap = $('<div class="us-dbg-img-wrap">' +
+                '<img src="' + url + '" alt="' + label + '">' +
+                '<div class="us-dbg-img-label">' + label + '</div>' +
+            '</div>');
+            $('#us-dbg-imgs').append(wrap);
+        } catch (e) { /* cross-origin safety */ }
+    },
+
+    // ── Called when a decoded EAN string arrives ─────────────────────────────────
     _onCaptureResult: function (raw) {
         var self = this;
 
-        $('#us-capture-btn').prop('disabled', false);
-
-        if (!raw) {
-            this._onCaptureNoResult();
+        // STAGE 6: EAN validation
+        if (!raw || !/^\d+$/.test(raw)) {
+            self._dbgStage(6, 'FAIL — not all-digits: "' + raw + '"', 'fail');
+            self._captureReset('⚠ Decoded a non-numeric value: "' + raw + '". Not an EAN barcode.');
             return;
         }
-
-        // EAN must be numeric digits only
-        if (!/^\d+$/.test(raw)) {
-            $('#us-cam-status').html(
-                '⚠ Decoded value is not numeric: <strong>' + raw + '</strong>. ' +
-                'Ensure the barcode is an EAN-13 or EAN-8.'
-            );
-            return;
-        }
-
-        // EAN must be 8 or 13 digits
         if (raw.length !== 8 && raw.length !== 13) {
-            $('#us-cam-status').html(
-                '⚠ Decoded ' + raw.length + '-digit code: <strong>' + raw + '</strong>. ' +
-                'Expected EAN-8 (8) or EAN-13 (13). Reposition and try again.'
-            );
+            self._dbgStage(6, 'FAIL — length ' + raw.length + ' (need 8 or 13): ' + raw, 'fail');
+            self._captureReset('⚠ Decoded ' + raw.length + '-digit code "' + raw + '". Need EAN-8 (8) or EAN-13 (13).');
             return;
         }
+        self._dbgStage(6, 'EAN validated — ' + raw.length + ' digits: ' + raw, 'ok');
 
-        // ── Valid EAN — populate input and trigger scan ──
-        var barcode = raw; // already a string with possible leading zeros preserved
-
-        // 1500ms per-barcode debounce (same barcode scanned recently → skip)
+        // STAGE 7: Debounce check (same barcode recently? skip)
         var now = Date.now();
-        if (
-            barcode === self.state.lastScannedBarcode &&
-            (now - self.state.lastScanTs) < 1500
-        ) {
-            $('#us-cam-status').html(
-                '⏸ Same barcode scanned recently. Wait a moment or scan a different product.'
-            );
+        if (raw === self.state.lastScannedBarcode && (now - self.state.lastScanTs) < 1500) {
+            self._dbgStage(7, 'Debounce — same EAN within 1500ms, skipping duplicate', 'info');
+            self._captureReset('⏸ Same barcode scanned within 1.5s — wait or scan a different product.');
             return;
         }
-        self.state.lastScannedBarcode = barcode;
+        self.state.lastScannedBarcode = raw;
+        self._dbgStage(7, 'scan_product() called with EAN: ' + raw, 'ok');
 
-        // Populate the visible barcode input field
-        $('#us-barcode-input').val(barcode);
-        $('#us-cam-status').html(
-            '✅ EAN decoded: <strong>' + barcode + '</strong> — submitting scan…'
-        );
+        // Populate visible barcode input
+        $('#us-barcode-input').val(raw);
+        $('#us-cam-status').html('✅ EAN: <strong>' + raw + '</strong> — looking up product…');
 
-        // Trigger the full scan pipeline
-        self._handleScan(barcode);
+        // Call existing scan pipeline (stages 8–9 happen in _handleScan)
+        self._handleScan(raw);
 
-        // After short delay re-enable capture for next product
+        // Re-enable capture button after 2.5s
         setTimeout(function () {
-            $('#us-capture-btn').prop('disabled', false);
-            $('#us-cam-status').text('🎯 Position EAN barcode inside the frame, then tap Capture');
+            self._captureReset('🎯 Ready for next scan');
             $('#us-barcode-input').val('');
-        }, 2000);
+        }, 2500);
     },
 
-    // Called when capture produced no decodable barcode
-    _onCaptureNoResult: function () {
+    // Re-enable capture button and update status text
+    _captureReset: function (msg) {
         $('#us-capture-btn').prop('disabled', false);
-        $('#us-cam-status').html(
-            '❌ Could not decode EAN barcode. ' +
-            'Position the barcode clearly inside the frame and tap Capture again.'
-        );
+        $('#us-cam-status').text(msg || '🎯 Position EAN barcode inside the frame, then tap Capture');
     },
 
     _stopCamera: function () {
-        // Stop all media tracks from the camera stream
         if (this.state.cameraStream) {
             try {
-                this.state.cameraStream.getTracks().forEach(function (track) {
-                    track.stop();
-                });
-            } catch (e) { /* ignore */ }
+                this.state.cameraStream.getTracks().forEach(function (t) { t.stop(); });
+            } catch (e) {}
             this.state.cameraStream = null;
         }
-
-        // Clear the video element
         var video = document.getElementById('us-camera-video');
-        if (video) {
-            video.srcObject = null;
-        }
-
+        if (video) { video.srcObject = null; }
         this.state.cameraActive = false;
         $('#us-camera-wrapper').hide();
+        $('#us-debug-panel').removeClass('us-dbg-visible');
         $('#us-cam-btn').removeClass('us-cam-stop').html('📷 Start Camera');
-        $('#us-capture-btn').prop('disabled', false);
     },
 
     // ─── Scan Handling ────────────────────────────────────────────────────────
