@@ -56,7 +56,9 @@ var UniversalScanner = function (page, wrapper) {
         debounceMs: 300,          // Match server-side DEBOUNCE_MS
         isProcessing: false,      // Prevents overlapping scan requests
         cameraActive: false,      // Camera scanner active flag
-        html5Qrcode: null,        // Html5Qrcode instance
+        cameraStream: null,       // MediaStream from getUserMedia
+        html5Qrcode: null,        // Html5Qrcode instance (legacy — kept for scanFile fallback)
+        lastScannedBarcode: null, // Last successfully decoded EAN (for per-barcode debounce)
     };
 };
 
@@ -287,6 +289,7 @@ UniversalScanner.prototype = {
 .us-cam-btn.us-cam-stop { background: #ef4444; }\
 .us-cam-btn.us-cam-stop:hover { background: #dc2626; }\
 \
+/* ── Camera Preview Wrapper ── */\
 .us-camera-wrapper {\
     margin-bottom: 14px;\
     border-radius: 12px;\
@@ -297,8 +300,83 @@ UniversalScanner.prototype = {
     margin-left: auto;\
     margin-right: auto;\
 }\
-#us-reader { width: 100%; min-height: 240px; }\
-#us-reader video { object-fit: cover; border-radius: 10px; }\
+/* Live video element */\
+#us-camera-video {\
+    width: 100%;\
+    display: block;\
+    min-height: 240px;\
+    object-fit: cover;\
+    border-radius: 10px 10px 0 0;\
+}\
+/* Aiming overlay drawn on top of video */\
+.us-cam-overlay {\
+    position: relative;\
+    background: #000;\
+}\
+.us-cam-overlay::after {\
+    content: "";\
+    position: absolute;\
+    top: 50%; left: 50%;\
+    transform: translate(-50%, -50%);\
+    width: 70%; height: 38%;\
+    border: 2.5px solid rgba(99,102,241,0.8);\
+    border-radius: 6px;\
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.35);\
+    pointer-events: none;\
+}\
+/* Hidden canvas used for frame capture */\
+#us-capture-canvas { display: none; }\
+/* Camera action buttons row */\
+.us-cam-actions {\
+    display: flex;\
+    gap: 10px;\
+    justify-content: center;\
+    padding: 12px;\
+    background: rgba(0,0,0,0.7);\
+    border-radius: 0 0 10px 10px;\
+}\
+/* Capture button — prominent */\
+#us-capture-btn {\
+    flex: 1;\
+    max-width: 260px;\
+    background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);\
+    color: #fff;\
+    border: none; border-radius: 10px;\
+    padding: 13px 20px;\
+    font-size: 15px; font-weight: 800;\
+    cursor: pointer;\
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;\
+    letter-spacing: 0.3px;\
+    transition: background 0.2s, transform 0.12s, box-shadow 0.2s;\
+    box-shadow: 0 4px 16px rgba(99,102,241,0.45);\
+}\
+#us-capture-btn:hover { background: linear-gradient(135deg,#4f46e5,#3730a3); transform: translateY(-1px); box-shadow: 0 6px 22px rgba(99,102,241,0.55); }\
+#us-capture-btn:active { transform: translateY(1px); box-shadow: none; }\
+#us-capture-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }\
+/* Stop camera button inside preview */\
+#us-stop-cam-btn {\
+    background: transparent;\
+    color: #ef4444;\
+    border: 1.5px solid #ef4444;\
+    border-radius: 10px;\
+    padding: 13px 18px;\
+    font-size: 13px; font-weight: 700;\
+    cursor: pointer;\
+    display: inline-flex; align-items: center; gap: 6px;\
+    transition: background 0.15s;\
+    white-space: nowrap;\
+}\
+#us-stop-cam-btn:hover { background: rgba(239,68,68,0.1); }\
+/* Camera decode status line */\
+#us-cam-status {\
+    font-size: 12px; font-weight: 600;\
+    color: rgba(255,255,255,0.75);\
+    text-align: center;\
+    padding: 5px 12px 0;\
+    background: rgba(0,0,0,0.7);\
+    min-height: 26px;\
+    letter-spacing: 0.2px;\
+}
 \
 .us-feedback {\
     margin-top: 12px; min-height: 28px;\
@@ -550,9 +628,24 @@ UniversalScanner.prototype = {
                 '<div class="us-section-lbl" style="margin-bottom:0">Barcode Scanner</div>' +
                 '<button id="us-cam-btn" class="us-cam-btn">📷 Start Camera</button>' +
               '</div>' +
+
+              /* Camera preview — shown only when camera is active */
               '<div id="us-camera-wrapper" class="us-camera-wrapper" style="display:none">' +
-                '<div id="us-reader"></div>' +
+                '<div class="us-cam-overlay">' +
+                  /* Live video stream */
+                  '<video id="us-camera-video" autoplay playsinline muted></video>' +
+                '</div>' +
+                /* Camera status text */
+                '<div id="us-cam-status">🎯 Position EAN barcode inside the frame, then tap Capture</div>' +
+                /* Action buttons row */
+                '<div class="us-cam-actions">' +
+                  '<button id="us-capture-btn">📷 CAPTURE &amp; SCAN EAN</button>' +
+                  '<button id="us-stop-cam-btn">⏹ Stop Camera</button>' +
+                '</div>' +
+                /* Hidden canvas for frame grabbing */
+                '<canvas id="us-capture-canvas"></canvas>' +
               '</div>' +
+
               '<div class="us-input-wrapper" id="us-input-wrapper">' +
                 '<span class="us-input-icon">🔍</span>' +
                 '<input type="text" id="us-barcode-input"' +
@@ -646,6 +739,14 @@ UniversalScanner.prototype = {
             self._toggleCamera();
         });
 
+        $('#us-capture-btn').on('click', function () {
+            self._captureAndScan();
+        });
+
+        $('#us-stop-cam-btn').on('click', function () {
+            self._stopCamera();
+        });
+
         // Click on wrapper → focus input
         $('#us-input-wrapper').on('click', function () {
             $('#us-barcode-input').focus();
@@ -691,6 +792,20 @@ UniversalScanner.prototype = {
     },
 
     // ─── Camera Barcode Scanner ───────────────────────────────────────────────
+    //
+    // Architecture: explicit Capture & Scan workflow.
+    //
+    //   1. _startCamera()      — opens getUserMedia video stream → shows preview
+    //   2. _captureAndScan()   — captures a single frame from the live video
+    //                           into a hidden <canvas>, then decodes the EAN
+    //                           using BarcodeDetector (native) or html5-qrcode
+    //                           scanFile() (fallback). Validates 8/13-digit EAN.
+    //                           Populates barcode input. Calls _handleScan().
+    //   3. _stopCamera()       — stops MediaStream tracks, hides preview.
+    //
+    // The user controls WHEN the frame is captured (the big button).
+    // No continuous auto-scan loop is used.
+    // ──────────────────────────────────────────────────────────────────────────
 
     _toggleCamera: function () {
         if (this.state.cameraActive) {
@@ -709,109 +824,236 @@ UniversalScanner.prototype = {
         script.src = 'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';
         script.onload = callback;
         script.onerror = function () {
-            frappe.msgprint(__('Failed to load camera barcode scanner library. Please check your internet connection.'));
+            // Library failed to load — BarcodeDetector fallback may still work
+            callback();
         };
         document.head.appendChild(script);
     },
 
     _startCamera: function () {
         var self = this;
-        this._loadHtml5QrcodeLibrary(function () {
-            $('#us-camera-wrapper').show();
-            var $btn = $('#us-cam-btn');
-            $btn.addClass('us-cam-stop').html('⏹ Stop Camera');
 
-            try {
-                var html5Qrcode = new Html5Qrcode('us-reader');
-                self.state.html5Qrcode = html5Qrcode;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            frappe.msgprint(__('Camera not supported in this browser. Please use Chrome or Safari on a mobile device.'));
+            return;
+        }
+
+        // Prefer rear camera on mobile; fall back to any camera
+        var constraints = {
+            video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            },
+            audio: false
+        };
+
+        navigator.mediaDevices.getUserMedia(constraints)
+            .then(function (stream) {
                 self.state.cameraActive = true;
+                self.state.cameraStream = stream;
 
-                // NOTE: Do NOT use Html5QrcodeSupportedFormats enum — it may be
-                // undefined in certain CDN builds, causing the config to be
-                // garbage-collected and the library returning format IDs instead
-                // of decoded text. Let html5-qrcode auto-detect all 1D/2D formats;
-                // we validate EAN length client-side after decoding.
-                var config = {
-                    fps: 10,
-                    qrbox: { width: 300, height: 200 },
-                    aspectRatio: 1.5
-                };
+                var video = document.getElementById('us-camera-video');
+                video.srcObject = stream;
+                video.play();
 
-                html5Qrcode.start(
-                    { facingMode: 'environment' },
-                    config,
-                    function (decodedText, decodedResult) {
-                        // html5-qrcode callback: first arg is always the decoded STRING.
-                        // Always cast to string to preserve leading zeros (e.g. "0123456789012").
-                        var barcode = String(decodedText || '').trim();
+                $('#us-camera-wrapper').show();
+                $('#us-cam-btn').addClass('us-cam-stop').html('📷 Camera Active');
+                $('#us-capture-btn').prop('disabled', false);
+                $('#us-cam-status').text('🎯 Position EAN barcode inside the frame, then tap Capture');
 
-                        // ── EAN validation ────────────────────────────────
-                        // Only process values that look like real EAN barcodes:
-                        // numeric, 8 chars (EAN-8) or 13 chars (EAN-13).
-                        if (!barcode || !/^\d+$/.test(barcode)) {
-                            // Not a numeric barcode string — ignore silently
-                            return;
-                        }
-                        if (barcode.length !== 8 && barcode.length !== 13) {
-                            // Not a standard EAN length — skip without error
-                            // (allows Code-128/QR through only if numeric and right length)
-                            return;
-                        }
-                        // ─────────────────────────────────────────────────
+                // Load html5-qrcode as fallback for browsers without BarcodeDetector
+                self._loadHtml5QrcodeLibrary(function () { /* pre-warm */ });
+            })
+            .catch(function (err) {
+                var msg = (err && (err.message || String(err))) || 'Permission denied';
+                frappe.msgprint(__('Camera access error: {0}. Grant camera permission and try again.', [msg]));
+            });
+    },
 
-                        // Camera-specific debounce: 1500ms prevents the same
-                        // barcode from being submitted 10× per second while
-                        // the user holds it steady in front of the camera.
-                        var now = Date.now();
-                        if (now - self.state.lastScanTs < 1500) {
-                            return;
-                        }
-                        if (self.state.isProcessing) {
-                            return;
-                        }
+    // Capture current video frame → decode EAN → populate input → scan
+    _captureAndScan: function () {
+        var self = this;
 
-                        // Populate the barcode input field visually so the user
-                        // can see what the camera decoded before the API call.
-                        $('#us-barcode-input').val(barcode);
+        if (!this.state.cameraActive || !this.state.cameraStream) {
+            frappe.msgprint(__('Camera is not active. Click "📷 Start Camera" first.'));
+            return;
+        }
+        if (this.state.isProcessing) {
+            return;
+        }
 
-                        self._handleScan(barcode);
-                    },
-                    function (errorMessage) {
-                        // Per-frame detection failures are normal and expected.
-                        // Do NOT show errors here — the camera scans many frames
-                        // before successfully decoding a barcode.
+        var video  = document.getElementById('us-camera-video');
+        var canvas = document.getElementById('us-capture-canvas');
+
+        // Size canvas to match the video frame
+        var vw = video.videoWidth  || 640;
+        var vh = video.videoHeight || 480;
+        canvas.width  = vw;
+        canvas.height = vh;
+
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, vw, vh);
+
+        $('#us-capture-btn').prop('disabled', true);
+        $('#us-cam-status').text('⏳ Decoding barcode…');
+
+        // ── Strategy 1: Native BarcodeDetector (Chrome 83+, Edge, Android Chrome)
+        if (window.BarcodeDetector) {
+            var detector = new BarcodeDetector({
+                formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39']
+            });
+            detector.detect(canvas)
+                .then(function (barcodes) {
+                    if (!barcodes || barcodes.length === 0) {
+                        self._onCaptureNoResult();
+                        return;
                     }
-                ).catch(function (err) {
-                    self._stopCamera();
-                    var msg = (err && (err.message || String(err))) || 'Permission denied';
-                    frappe.msgprint(__('Camera access error: {0}', [msg]));
+                    // BarcodeDetector.rawValue is the decoded string
+                    var raw = String(barcodes[0].rawValue || '').trim();
+                    self._onCaptureResult(raw);
+                })
+                .catch(function (err) {
+                    // BarcodeDetector failed — fall through to html5-qrcode
+                    self._captureWithHtml5Qrcode(canvas, vw, vh);
                 });
-            } catch (e) {
-                self._stopCamera();
-                frappe.msgprint(__('Could not start camera scanner: {0}', [e.message || String(e)]));
+            return;
+        }
+
+        // ── Strategy 2: html5-qrcode scanFile() fallback
+        self._captureWithHtml5Qrcode(canvas, vw, vh);
+    },
+
+    // Decode canvas frame using html5-qrcode scanFile API
+    _captureWithHtml5Qrcode: function (canvas, vw, vh) {
+        var self = this;
+
+        if (!window.Html5Qrcode) {
+            self._onCaptureNoResult();
+            return;
+        }
+
+        // Convert canvas to Blob then File for Html5Qrcode.scanFile()
+        canvas.toBlob(function (blob) {
+            if (!blob) {
+                self._onCaptureNoResult();
+                return;
             }
-        });
+            var file = new File([blob], 'capture.jpg', { type: 'image/jpeg' });
+
+            // Create a temporary off-screen element for the scanner instance
+            var tempId = 'us-qr-temp-' + Date.now();
+            var tempDiv = document.createElement('div');
+            tempDiv.id = tempId;
+            tempDiv.style.display = 'none';
+            document.body.appendChild(tempDiv);
+
+            var scanner = new Html5Qrcode(tempId);
+            scanner.scanFile(file, false)
+                .then(function (decodedText) {
+                    document.body.removeChild(tempDiv);
+                    var raw = String(decodedText || '').trim();
+                    self._onCaptureResult(raw);
+                })
+                .catch(function (err) {
+                    document.body.removeChild(tempDiv);
+                    self._onCaptureNoResult();
+                });
+        }, 'image/jpeg', 0.95);
+    },
+
+    // Called when a decoded string arrives from either decoder
+    _onCaptureResult: function (raw) {
+        var self = this;
+
+        $('#us-capture-btn').prop('disabled', false);
+
+        if (!raw) {
+            this._onCaptureNoResult();
+            return;
+        }
+
+        // EAN must be numeric digits only
+        if (!/^\d+$/.test(raw)) {
+            $('#us-cam-status').html(
+                '⚠ Decoded value is not numeric: <strong>' + raw + '</strong>. ' +
+                'Ensure the barcode is an EAN-13 or EAN-8.'
+            );
+            return;
+        }
+
+        // EAN must be 8 or 13 digits
+        if (raw.length !== 8 && raw.length !== 13) {
+            $('#us-cam-status').html(
+                '⚠ Decoded ' + raw.length + '-digit code: <strong>' + raw + '</strong>. ' +
+                'Expected EAN-8 (8) or EAN-13 (13). Reposition and try again.'
+            );
+            return;
+        }
+
+        // ── Valid EAN — populate input and trigger scan ──
+        var barcode = raw; // already a string with possible leading zeros preserved
+
+        // 1500ms per-barcode debounce (same barcode scanned recently → skip)
+        var now = Date.now();
+        if (
+            barcode === self.state.lastScannedBarcode &&
+            (now - self.state.lastScanTs) < 1500
+        ) {
+            $('#us-cam-status').html(
+                '⏸ Same barcode scanned recently. Wait a moment or scan a different product.'
+            );
+            return;
+        }
+        self.state.lastScannedBarcode = barcode;
+
+        // Populate the visible barcode input field
+        $('#us-barcode-input').val(barcode);
+        $('#us-cam-status').html(
+            '✅ EAN decoded: <strong>' + barcode + '</strong> — submitting scan…'
+        );
+
+        // Trigger the full scan pipeline
+        self._handleScan(barcode);
+
+        // After short delay re-enable capture for next product
+        setTimeout(function () {
+            $('#us-capture-btn').prop('disabled', false);
+            $('#us-cam-status').text('🎯 Position EAN barcode inside the frame, then tap Capture');
+            $('#us-barcode-input').val('');
+        }, 2000);
+    },
+
+    // Called when capture produced no decodable barcode
+    _onCaptureNoResult: function () {
+        $('#us-capture-btn').prop('disabled', false);
+        $('#us-cam-status').html(
+            '❌ Could not decode EAN barcode. ' +
+            'Position the barcode clearly inside the frame and tap Capture again.'
+        );
     },
 
     _stopCamera: function () {
-        var self = this;
-        if (this.state.html5Qrcode && this.state.cameraActive) {
+        // Stop all media tracks from the camera stream
+        if (this.state.cameraStream) {
             try {
-                this.state.html5Qrcode.stop().then(function () {
-                    if (self.state.html5Qrcode) {
-                        self.state.html5Qrcode.clear();
-                        self.state.html5Qrcode = null;
-                    }
-                }).catch(function (err) {
-                    self.state.html5Qrcode = null;
+                this.state.cameraStream.getTracks().forEach(function (track) {
+                    track.stop();
                 });
-            } catch (e) {
-                this.state.html5Qrcode = null;
-            }
+            } catch (e) { /* ignore */ }
+            this.state.cameraStream = null;
         }
+
+        // Clear the video element
+        var video = document.getElementById('us-camera-video');
+        if (video) {
+            video.srcObject = null;
+        }
+
         this.state.cameraActive = false;
         $('#us-camera-wrapper').hide();
         $('#us-cam-btn').removeClass('us-cam-stop').html('📷 Start Camera');
+        $('#us-capture-btn').prop('disabled', false);
     },
 
     // ─── Scan Handling ────────────────────────────────────────────────────────
