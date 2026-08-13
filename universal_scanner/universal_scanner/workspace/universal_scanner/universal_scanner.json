@@ -1,0 +1,59 @@
+{
+ "charts": [],
+ "content": "[{\"id\":\"us-hdr-scanning\",\"type\":\"header\",\"data\":{\"text\":\"Scanning\",\"col\":12}},{\"id\":\"us-sc-scanner\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Product Scanner\",\"col\":3}},{\"id\":\"us-hdr-sessions\",\"type\":\"header\",\"data\":{\"text\":\"Scan Sessions\",\"col\":12}},{\"id\":\"us-sc-session\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Scan Session\",\"col\":3}},{\"id\":\"us-sc-log\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Product Scan Log\",\"col\":3}},{\"id\":\"us-hdr-reports\",\"type\":\"header\",\"data\":{\"text\":\"Scan Reports\",\"col\":12}},{\"id\":\"us-sc-log-report\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Product Scan Log List\",\"col\":3}},{\"id\":\"us-sc-session-report\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Scan Session List\",\"col\":3}}]",
+ "creation": "2026-08-13 00:00:00.000000",
+ "doctype": "Workspace",
+ "hide_custom": 0,
+ "is_hidden": 0,
+ "label": "Universal Scanner",
+ "modified": "2026-08-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Universal Scanner",
+ "name": "Universal Scanner",
+ "owner": "Administrator",
+ "public": 1,
+ "roles": [
+  { "role": "Scanner User" },
+  { "role": "System Manager" }
+ ],
+ "sequence_id": 1.0,
+ "shortcuts": [
+  {
+   "label": "Product Scanner",
+   "link_to": "product-scanner",
+   "type": "Page",
+   "icon": "fa fa-barcode"
+  },
+  {
+   "color": "Blue",
+   "format": "{} Active",
+   "label": "Scan Session",
+   "link_to": "Scan Session",
+   "stats_filter": "{\"status\": \"Active\"}",
+   "type": "DocType",
+   "icon": "fa fa-clock-o"
+  },
+  {
+   "color": "Green",
+   "format": "{} Logs",
+   "label": "Product Scan Log",
+   "link_to": "Product Scan Log",
+   "stats_filter": "{}",
+   "type": "DocType",
+   "icon": "fa fa-list"
+  },
+  {
+   "label": "Product Scan Log List",
+   "link_to": "Product Scan Log",
+   "type": "DocType",
+   "icon": "fa fa-file-text-o"
+  },
+  {
+   "label": "Scan Session List",
+   "link_to": "Scan Session",
+   "type": "DocType",
+   "icon": "fa fa-folder-open-o"
+  }
+ ],
+ "title": "Universal Scanner"
+}

@@ -29,6 +29,10 @@ fixtures = [
         "dt": "Role",
         "filters": [["name", "in", ["Scanner User"]]],
     },
+    {
+        "dt": "Workspace",
+        "filters": [["name", "in", ["Universal Scanner"]]],
+    },
 ]
 
 # ─── Document Events ──────────────────────────────────────────────────────────
