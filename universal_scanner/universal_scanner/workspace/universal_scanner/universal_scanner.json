@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"id\":\"us-hdr-scanning\",\"type\":\"header\",\"data\":{\"text\":\"Scanning\",\"col\":12}},{\"id\":\"us-sc-scanner\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Product Scanner\",\"col\":3}},{\"id\":\"us-hdr-sessions\",\"type\":\"header\",\"data\":{\"text\":\"Scan Sessions\",\"col\":12}},{\"id\":\"us-sc-session\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Scan Session\",\"col\":3}},{\"id\":\"us-hdr-reports\",\"type\":\"header\",\"data\":{\"text\":\"Scan Reports\",\"col\":12}},{\"id\":\"us-sc-report\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Scan Session Report\",\"col\":3}}]",
+ "content": "[{\"id\":\"us-hdr-scanning\",\"type\":\"header\",\"data\":{\"text\":\"Scanning\",\"col\":12}},{\"id\":\"us-sc-scanner\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Product Scanner\",\"col\":3}},{\"id\":\"us-hdr-sessions\",\"type\":\"header\",\"data\":{\"text\":\"Scan Sessions\",\"col\":12}},{\"id\":\"us-sc-session\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Scan Session\",\"col\":3}}]",
  "creation": "2026-08-13 00:00:00.000000",
  "doctype": "Workspace",
  "hide_custom": 0,
@@ -32,13 +32,6 @@
    "stats_filter": "{\"status\": \"Active\"}",
    "type": "DocType",
    "icon": "fa fa-clock-o"
-  },
-  {
-   "color": "Green",
-   "label": "Scan Session Report",
-   "link_to": "Scan Session Report",
-   "type": "Report",
-   "icon": "fa fa-bar-chart"
   }
  ],
  "title": "Universal Scanner"

@@ -165,3 +165,35 @@ class TestScanSession(unittest.TestCase):
         frappe.db.commit()
         doc.reload()
         self.assertIsNotNone(doc.ended_at)
+
+    # ─── Child Table & Aggregation Tests ──────────────────────────────────────
+
+    def test_add_or_update_product_child_table(self):
+        """Scanning a product adds a row or increments an existing product row."""
+        doc = self._make_session(status="Active")
+        doc.add_or_update_product("ITEM-001", "Item 1", "BC-001", qty=1)
+        doc.save(ignore_permissions=True)
+
+        self.assertEqual(len(doc.session_products), 1)
+        self.assertEqual(doc.session_products[0].item_code, "ITEM-001")
+        self.assertEqual(doc.session_products[0].quantity, 1)
+        self.assertEqual(doc.total_products, 1)
+        self.assertEqual(doc.total_units_scanned, 1)
+
+        # Second scan of same product -> quantity 2, scan_count 2 (still 1 row)
+        doc.add_or_update_product("ITEM-001", "Item 1", "BC-001", qty=1)
+        doc.save(ignore_permissions=True)
+
+        self.assertEqual(len(doc.session_products), 1)
+        self.assertEqual(doc.session_products[0].quantity, 2)
+        self.assertEqual(doc.total_products, 1)
+        self.assertEqual(doc.total_units_scanned, 2)
+
+        # Scan different product -> new row created
+        doc.add_or_update_product("ITEM-002", "Item 2", "BC-002", qty=3)
+        doc.save(ignore_permissions=True)
+
+        self.assertEqual(len(doc.session_products), 2)
+        self.assertEqual(doc.total_products, 2)
+        self.assertEqual(doc.total_units_scanned, 5)
+

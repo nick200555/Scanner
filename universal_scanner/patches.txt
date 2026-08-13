@@ -1,2 +1,3 @@
 # Patches are applied during bench migrate.
 # Format: app_name.path.to.patch_module
+universal_scanner.patches.patch_rebuild_session_products

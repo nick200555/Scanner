@@ -248,7 +248,8 @@ class TestProductScanLog(unittest.TestCase):
             )
 
         summary = get_session_summary(session)
-        self.assertEqual(summary["total_units"], 16)
+        self.assertEqual(summary["total_units_scanned"], 16)
+        self.assertEqual(summary["total_products"], 3)
 
         by_product = {p["product_id"]: p for p in summary["products"]}
         self.assertEqual(by_product[self.item1_code]["quantity"], 5)
@@ -258,24 +259,32 @@ class TestProductScanLog(unittest.TestCase):
         self.assertEqual(by_product[self.item3_code]["quantity"], 8)
         self.assertEqual(by_product[self.item3_code]["scan_count"], 8)
 
-    def test_get_product_scan_count_direct(self):
-        """get_product_scan_count returns correct count for a single product."""
-        session = self._make_session()
-        for _ in range(4):
-            create_scan_log(
-                session=session,
-                barcode=_TEST_BARCODE_1,
-                item_code=self.item1_code,
-                item_name="US Test Item Alpha",
-            )
+    def test_rebuild_session_products_migration(self):
+        """rebuild_session_products safely populates session_products from historical logs."""
+        from universal_scanner.api.scanner import rebuild_session_products
 
-        result = get_product_scan_count(session, self.item1_code)
-        self.assertEqual(result["quantity"], 4)
-        self.assertEqual(result["scan_count"], 4)
+        session = self._make_session()
+        create_scan_log(session=session, barcode=_TEST_BARCODE_1, item_code=self.item1_code, item_name="Alpha")
+        create_scan_log(session=session, barcode=_TEST_BARCODE_1, item_code=self.item1_code, item_name="Alpha")
+        create_scan_log(session=session, barcode=_TEST_BARCODE_2, item_code=self.item2_code, item_name="Beta")
+
+        # Clear child table to simulate historical data created before child table existed
+        doc = frappe.get_doc("Scan Session", session)
+        doc.set("session_products", [])
+        doc.total_products = 0
+        doc.total_units_scanned = 0
+        doc.save(ignore_permissions=True)
+
+        rebuild_session_products(session)
+
+        doc.reload()
+        self.assertEqual(doc.total_products, 2)
+        self.assertEqual(doc.total_units_scanned, 3)
 
     def test_session_summary_empty_for_new_session(self):
         """A new session with no scans returns an empty products list."""
         session = self._make_session()
         summary = get_session_summary(session)
-        self.assertEqual(summary["total_units"], 0)
+        self.assertEqual(summary["total_units_scanned"], 0)
+        self.assertEqual(summary["total_products"], 0)
         self.assertEqual(summary["products"], [])

@@ -2,7 +2,8 @@
 # License: MIT
 # ─────────────────────────────────────────────────────────────────────────────
 # Scan Session DocType controller.
-# Manages session lifecycle: Draft → Active → Completed / Cancelled.
+# Manages session lifecycle: Draft → Active → Completed / Cancelled,
+# and maintains summarized product counts in the session_products child table.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import frappe
@@ -25,6 +26,7 @@ class ScanSession(Document):
         """Run all validation rules on every save."""
         self._validate_status_transition()
         self._set_timestamps()
+        self.recalculate_totals()
 
     def on_trash(self):
         """
@@ -32,6 +34,57 @@ class ScanSession(Document):
         This keeps orphan Product Scan Log records from accumulating.
         """
         frappe.db.delete("Product Scan Log", {"scan_session": self.name})
+
+    # ─── Summary & Product Helpers ───────────────────────────────────────────
+
+    def recalculate_totals(self):
+        """Recalculate summary totals from the session_products child table."""
+        products = self.session_products or []
+        self.total_products = len(products)
+        self.total_units_scanned = sum(int(p.quantity or 0) for p in products)
+
+    def add_or_update_product(self, item_code, item_name, barcode, uom="", warehouse="", qty=1):
+        """
+        Adds a new product row or increments an existing row in session_products.
+
+        One row per product is maintained.
+        """
+        if self.status != "Active":
+            frappe.throw(
+                _("Cannot scan items into a '{0}' session. Session must be Active.").format(self.status),
+                frappe.ValidationError,
+            )
+
+        existing_row = None
+        for row in (self.session_products or []):
+            if row.item_code == item_code:
+                existing_row = row
+                break
+
+        if existing_row:
+            existing_row.quantity = int(existing_row.quantity or 0) + qty
+            existing_row.scan_count = int(existing_row.scan_count or 0) + qty
+            if barcode and not existing_row.barcode:
+                existing_row.barcode = barcode
+            if uom and not existing_row.uom:
+                existing_row.uom = uom
+            if warehouse and not existing_row.warehouse:
+                existing_row.warehouse = warehouse
+        else:
+            self.append(
+                "session_products",
+                {
+                    "item_code": item_code,
+                    "item_name": item_name,
+                    "barcode": barcode,
+                    "quantity": qty,
+                    "scan_count": qty,
+                    "uom": uom or "",
+                    "warehouse": warehouse or self.warehouse or "",
+                },
+            )
+
+        self.recalculate_totals()
 
     # ─── Validation Helpers ───────────────────────────────────────────────────
 

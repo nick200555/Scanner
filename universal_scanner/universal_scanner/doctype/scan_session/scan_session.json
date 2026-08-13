@@ -12,9 +12,13 @@
   "column_break_1",
   "started_at",
   "ended_at",
+  "total_products",
+  "total_units_scanned",
   "details_section",
   "warehouse",
-  "description"
+  "description",
+  "products_section",
+  "session_products"
  ],
  "fields": [
   {
@@ -52,6 +56,23 @@
    "label": "Ended At"
   },
   {
+   "fieldname": "total_products",
+   "fieldtype": "Int",
+   "label": "Total Products",
+   "default": "0",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "total_units_scanned",
+   "fieldtype": "Int",
+   "label": "Total Units Scanned",
+   "default": "0",
+   "read_only": 1,
+   "in_list_view": 1,
+   "bold": 1
+  },
+  {
    "fieldname": "details_section",
    "fieldtype": "Section Break",
    "label": "Session Details"
@@ -69,6 +90,17 @@
    "fieldtype": "Small Text",
    "label": "Description",
    "description": "Optional label for this scanning session (e.g. 'Morning stock count')"
+  },
+  {
+   "fieldname": "products_section",
+   "fieldtype": "Section Break",
+   "label": "Products Scanned"
+  },
+  {
+   "fieldname": "session_products",
+   "fieldtype": "Table",
+   "label": "Products Scanned",
+   "options": "Scan Session Product"
   }
  ],
  "has_web_view": 0,

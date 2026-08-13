@@ -122,7 +122,7 @@ def scan_product(barcode, session):
     # Inherit warehouse from session
     warehouse = frappe.db.get_value("Scan Session", session, "warehouse") or ""
 
-    # Record the scan (quantity = 1 per call, enforced by the DocType controller)
+    # Record individual scan log for granular audit history
     create_scan_log(
         session=session,
         barcode=barcode,
@@ -131,8 +131,27 @@ def scan_product(barcode, session):
         warehouse=warehouse,
     )
 
-    # Return updated totals for this product in this session
-    totals = get_product_scan_count(session, product["item_code"])
+    # Update summarized session_products child table and total counters on Scan Session
+    session_doc = frappe.get_doc("Scan Session", session)
+    session_doc.add_or_update_product(
+        item_code=product["item_code"],
+        item_name=product["item_name"],
+        barcode=barcode,
+        uom=product.get("uom", ""),
+        warehouse=warehouse,
+        qty=1,
+    )
+    session_doc.save(ignore_permissions=True)
+    frappe.db.commit()
+
+    # Get updated item totals from the child table
+    item_qty = 0
+    item_scans = 0
+    for row in (session_doc.session_products or []):
+        if row.item_code == product["item_code"]:
+            item_qty = row.quantity
+            item_scans = row.scan_count
+            break
 
     return {
         "success": True,
@@ -140,9 +159,13 @@ def scan_product(barcode, session):
         "product_name": product["item_name"],
         "barcode": barcode,
         "uom": product.get("uom", ""),
-        "quantity": totals["quantity"],
-        "scan_count": totals["scan_count"],
+        "quantity": item_qty,
+        "scan_count": item_scans,
         "session": session,
+        "session_totals": {
+            "total_products": session_doc.total_products,
+            "total_units_scanned": session_doc.total_units_scanned,
+        },
     }
 
 
@@ -152,31 +175,7 @@ def get_session_summary(session):
     Returns an aggregated summary of all scans in a session.
 
     Designed to be called by external Frappe applications that want to consume
-    scanner data (e.g. to create a Purchase Receipt or Stock Entry):
-
-        frappe.call(
-            "universal_scanner.api.scanner.get_session_summary",
-            session="SESSION-00001"
-        )
-
-    Args:
-        session (str): Name of the Scan Session to summarise.
-
-    Returns:
-        dict: {
-            session: str,
-            products: [
-                {
-                    product_id: str,
-                    product_name: str,
-                    barcode: str,
-                    quantity: int,
-                    scan_count: int
-                },
-                ...
-            ],
-            total_units: int
-        }
+    scanner data (e.g. to create a Purchase Receipt or Stock Entry).
     """
     session = (session or "").strip()
     if not session:
@@ -189,40 +188,110 @@ def get_session_summary(session):
         )
 
     frappe.has_permission("Scan Session", "read", session, throw=True)
+    session_doc = frappe.get_doc("Scan Session", session)
 
-    rows = frappe.db.sql(
-        """
-        SELECT
-            item_code           AS product_id,
-            item_name           AS product_name,
-            barcode,
-            SUM(quantity)       AS quantity,
-            COUNT(name)         AS scan_count
-        FROM
-            `tabProduct Scan Log`
-        WHERE
-            scan_session = %(session)s
-        GROUP BY
-            item_code, item_name, barcode
-        ORDER BY
-            scan_count DESC
-        """,
-        {"session": session},
-        as_dict=True,
-    )
+    products = []
+    if session_doc.session_products:
+        for p in session_doc.session_products:
+            products.append(
+                {
+                    "product_id": p.item_code,
+                    "product_name": p.item_name,
+                    "barcode": p.barcode,
+                    "quantity": int(p.quantity or 0),
+                    "scan_count": int(p.scan_count or 0),
+                    "uom": p.uom or "",
+                    "warehouse": p.warehouse or "",
+                }
+            )
+    else:
+        # Fallback to aggregation query from logs if child table hasn't been populated yet
+        rows = frappe.db.sql(
+            """
+            SELECT
+                item_code           AS product_id,
+                item_name           AS product_name,
+                barcode,
+                SUM(quantity)       AS quantity,
+                COUNT(name)         AS scan_count
+            FROM
+                `tabProduct Scan Log`
+            WHERE
+                scan_session = %(session)s
+            GROUP BY
+                item_code, item_name, barcode
+            ORDER BY
+                scan_count DESC
+            """,
+            {"session": session},
+            as_dict=True,
+        )
+        for row in rows:
+            row["quantity"] = int(row["quantity"])
+            row["scan_count"] = int(row["scan_count"])
+        products = rows
 
-    # Ensure int types (MariaDB may return Decimal from SUM)
-    for row in rows:
-        row["quantity"] = int(row["quantity"])
-        row["scan_count"] = int(row["scan_count"])
-
-    total_units = sum(r["quantity"] for r in rows)
+    total_units = sum(p["quantity"] for p in products)
+    total_products = len(products)
 
     return {
         "session": session,
-        "products": rows,
-        "total_units": total_units,
+        "status": session_doc.status,
+        "products": products,
+        "total_products": total_products,
+        "total_units_scanned": total_units,
     }
+
+
+def rebuild_session_products(session_name=None):
+    """
+    Rebuilds session_products child table and summary fields from Product Scan Log
+    for one or all sessions. Ensures existing logs are safely migrated without data loss.
+    """
+    filters = {}
+    if session_name:
+        filters["name"] = session_name
+
+    sessions = frappe.db.get_all("Scan Session", filters=filters, pluck="name")
+
+    for sname in sessions:
+        doc = frappe.get_doc("Scan Session", sname)
+
+        logs = frappe.db.sql(
+            """
+            SELECT
+                item_code,
+                item_name,
+                barcode,
+                warehouse,
+                SUM(quantity) AS quantity,
+                COUNT(name) AS scan_count
+            FROM `tabProduct Scan Log`
+            WHERE scan_session = %(session)s
+            GROUP BY item_code, item_name, barcode, warehouse
+            """,
+            {"session": sname},
+            as_dict=True,
+        )
+
+        doc.set("session_products", [])
+        for log in logs:
+            doc.append(
+                "session_products",
+                {
+                    "item_code": log["item_code"],
+                    "item_name": log["item_name"],
+                    "barcode": log["barcode"],
+                    "quantity": int(log["quantity"] or 0),
+                    "scan_count": int(log["scan_count"] or 0),
+                    "warehouse": log.get("warehouse") or doc.warehouse or "",
+                },
+            )
+
+        doc.recalculate_totals()
+        doc.save(ignore_permissions=True)
+
+    frappe.db.commit()
 
 
 @frappe.whitelist()
