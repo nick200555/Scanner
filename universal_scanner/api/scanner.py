@@ -248,6 +248,9 @@ def rebuild_session_products(session_name=None):
     Rebuilds session_products child table and summary fields from Product Scan Log
     for one or all sessions. Ensures existing logs are safely migrated without data loss.
     """
+    if not frappe.db.table_exists("Scan Session Product"):
+        return
+
     filters = {}
     if session_name:
         filters["name"] = session_name
@@ -256,6 +259,8 @@ def rebuild_session_products(session_name=None):
 
     for sname in sessions:
         doc = frappe.get_doc("Scan Session", sname)
+        if not doc.meta.has_field("session_products"):
+            continue
 
         logs = frappe.db.sql(
             """
