@@ -21,6 +21,7 @@ from universal_scanner.api.scanner import (
     get_product_scan_count,
     get_session_summary,
     scan_product,
+    validate_ean_checksum,
 )
 
 # ─── Test Fixtures ────────────────────────────────────────────────────────────
@@ -119,6 +120,24 @@ class TestProductScanLog(unittest.TestCase):
         """An unknown barcode returns None, not an exception."""
         result = find_product_by_barcode(_NONEXISTENT_BARCODE)
         self.assertIsNone(result)
+
+    def test_validate_ean_checksum(self):
+        """Validates EAN-13 and EAN-8 checksum calculation."""
+        self.assertTrue(validate_ean_checksum("4006381333931"))  # Valid EAN-13
+        self.assertTrue(validate_ean_checksum("73513537"))       # Valid EAN-8
+        self.assertFalse(validate_ean_checksum("4006381333930")) # Invalid check digit
+
+    def test_scan_ean_with_leading_zero(self):
+        """EAN barcode string with leading zero must retain leading zero."""
+        item_code = "US-TEST-ITEM-EAN0"
+        ean_bc = "0123456789012"
+        self._create_test_item(item_code, "US Test Item EAN Leading Zero", ean_bc)
+
+        session = self._make_session()
+        res = scan_product(barcode=ean_bc, session=session)
+        self.assertTrue(res["success"])
+        self.assertEqual(res["barcode"], "0123456789012")
+        self.assertEqual(res["product_id"], item_code)
 
     # ─── Scan Quantity Accumulation Tests ─────────────────────────────────────
 

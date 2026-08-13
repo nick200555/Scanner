@@ -60,6 +60,33 @@ SCANNER_CONFIG = {
 DEBOUNCE_MS = 300
 
 
+def validate_ean_checksum(barcode):
+    """
+    Validates standard EAN-13 or EAN-8 checksum.
+    Returns True if valid checksum or if barcode is not standard EAN-8/13 length.
+    Guards that string type and leading zeros are preserved.
+    """
+    barcode = str(barcode or "").strip()
+    if not barcode or not barcode.isdigit():
+        return False
+    if len(barcode) not in (8, 13):
+        return True  # Non-standard EAN length, skip check
+
+    digits = [int(d) for d in barcode]
+    check_digit = digits[-1]
+    payload = digits[:-1]
+
+    if len(barcode) == 13:
+        # EAN-13: Odd indices * 1, Even indices * 3 (0-indexed: even idx * 1, odd idx * 3)
+        total = sum(d * (1 if i % 2 == 0 else 3) for i, d in enumerate(payload))
+    else:
+        # EAN-8: Odd indices * 3, Even indices * 1 (0-indexed: even idx * 3, odd idx * 1)
+        total = sum(d * (3 if i % 2 == 0 else 1) for i, d in enumerate(payload))
+
+    calculated = (10 - (total % 10)) % 10
+    return calculated == check_digit
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public Whitelisted API
 # ─────────────────────────────────────────────────────────────────────────────

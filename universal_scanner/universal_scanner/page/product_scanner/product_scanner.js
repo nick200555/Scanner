@@ -31,6 +31,12 @@ frappe.pages['product-scanner'].on_page_show = function (wrapper) {
     }
 };
 
+frappe.pages['product-scanner'].on_page_hide = function (wrapper) {
+    if (wrapper._us_scanner) {
+        wrapper._us_scanner._stopCamera();
+    }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // UniversalScanner — Main controller class
 // ─────────────────────────────────────────────────────────────────────────────
@@ -49,6 +55,8 @@ var UniversalScanner = function (page, wrapper) {
         lastScanTs: 0,            // JS-side debounce timestamp (Date.now())
         debounceMs: 300,          // Match server-side DEBOUNCE_MS
         isProcessing: false,      // Prevents overlapping scan requests
+        cameraActive: false,      // Camera scanner active flag
+        html5Qrcode: null,        // Html5Qrcode instance
     };
 };
 
@@ -260,6 +268,37 @@ UniversalScanner.prototype = {
     animation: us-spin 0.7s linear infinite;\
 }\
 .us-scan-dot.us--err { background: #ef4444; animation: none; }\
+\
+.us-camera-header {\
+    display: flex;\
+    align-items: center;\
+    justify-content: space-between;\
+    margin-bottom: 12px;\
+}\
+.us-cam-btn {\
+    background: #6366f1; color: #fff;\
+    border: none; border-radius: 8px;\
+    padding: 7px 14px; font-size: 12px; font-weight: 700;\
+    cursor: pointer;\
+    display: inline-flex; align-items: center; gap: 6px;\
+    transition: background 0.2s, transform 0.15s;\
+}\
+.us-cam-btn:hover { background: #4f46e5; transform: translateY(-1px); }\
+.us-cam-btn.us-cam-stop { background: #ef4444; }\
+.us-cam-btn.us-cam-stop:hover { background: #dc2626; }\
+\
+.us-camera-wrapper {\
+    margin-bottom: 14px;\
+    border-radius: 12px;\
+    overflow: hidden;\
+    border: 2px solid #6366f1;\
+    background: #000;\
+    max-width: 500px;\
+    margin-left: auto;\
+    margin-right: auto;\
+}\
+#us-reader { width: 100%; min-height: 240px; }\
+#us-reader video { object-fit: cover; border-radius: 10px; }\
 \
 .us-feedback {\
     margin-top: 12px; min-height: 28px;\
@@ -507,7 +546,13 @@ UniversalScanner.prototype = {
 
             /* Barcode scanner */
             '<div class="us-scan-card" id="us-scan-card">' +
-              '<div class="us-section-lbl">Barcode Scanner</div>' +
+              '<div class="us-camera-header">' +
+                '<div class="us-section-lbl" style="margin-bottom:0">Barcode Scanner</div>' +
+                '<button id="us-cam-btn" class="us-cam-btn">📷 Start Camera</button>' +
+              '</div>' +
+              '<div id="us-camera-wrapper" class="us-camera-wrapper" style="display:none">' +
+                '<div id="us-reader"></div>' +
+              '</div>' +
               '<div class="us-input-wrapper" id="us-input-wrapper">' +
                 '<span class="us-input-icon">🔍</span>' +
                 '<input type="text" id="us-barcode-input"' +
@@ -517,7 +562,7 @@ UniversalScanner.prototype = {
                 '<span class="us-scan-dot" id="us-scan-dot"></span>' +
               '</div>' +
               '<div class="us-feedback us-fb-idle" id="us-feedback">' +
-                '● Ready — focus input and scan a barcode' +
+                '● Ready — focus input, scan with camera, or type barcode' +
               '</div>' +
             '</div>' +
 
@@ -597,6 +642,10 @@ UniversalScanner.prototype = {
             self._confirmCancelSession();
         });
 
+        $('#us-cam-btn').on('click', function () {
+            self._toggleCamera();
+        });
+
         // Click on wrapper → focus input
         $('#us-input-wrapper').on('click', function () {
             $('#us-barcode-input').focus();
@@ -639,6 +688,109 @@ UniversalScanner.prototype = {
             var el = document.getElementById('us-barcode-input');
             if (el) el.focus();
         }, 200);
+    },
+
+    // ─── Camera Barcode Scanner ───────────────────────────────────────────────
+
+    _toggleCamera: function () {
+        if (this.state.cameraActive) {
+            this._stopCamera();
+        } else {
+            this._startCamera();
+        }
+    },
+
+    _loadHtml5QrcodeLibrary: function (callback) {
+        if (window.Html5Qrcode) {
+            callback();
+            return;
+        }
+        var script = document.createElement('script');
+        script.src = 'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';
+        script.onload = callback;
+        script.onerror = function () {
+            frappe.msgprint(__('Failed to load camera barcode scanner library. Please check your internet connection.'));
+        };
+        document.head.appendChild(script);
+    },
+
+    _startCamera: function () {
+        var self = this;
+        this._loadHtml5QrcodeLibrary(function () {
+            $('#us-camera-wrapper').show();
+            var $btn = $('#us-cam-btn');
+            $btn.addClass('us-cam-stop').html('⏹ Stop Camera');
+
+            try {
+                var html5Qrcode = new Html5Qrcode('us-reader');
+                self.state.html5Qrcode = html5Qrcode;
+                self.state.cameraActive = true;
+
+                var config = {
+                    fps: 10,
+                    qrbox: { width: 280, height: 180 },
+                    aspectRatio: 1.5,
+                    formatsToSupport: [
+                        Html5QrcodeSupportedFormats.EAN_13,
+                        Html5QrcodeSupportedFormats.EAN_8,
+                        Html5QrcodeSupportedFormats.UPC_A,
+                        Html5QrcodeSupportedFormats.UPC_E,
+                        Html5QrcodeSupportedFormats.CODE_128,
+                        Html5QrcodeSupportedFormats.CODE_39
+                    ]
+                };
+
+                html5Qrcode.start(
+                    { facingMode: 'environment' },
+                    config,
+                    function (decodedText, decodedResult) {
+                        // Raw decoded text as string preserving leading zeros (e.g. "0123456789012")
+                        var barcode = String(decodedText || '').trim();
+                        if (!barcode) return;
+
+                        var now = Date.now();
+                        if (now - self.state.lastScanTs < self.state.debounceMs) {
+                            return;
+                        }
+                        if (self.state.isProcessing) {
+                            return;
+                        }
+
+                        self._handleScan(barcode);
+                    },
+                    function (errorMessage) {
+                        // Silent scanning frames callback
+                    }
+                ).catch(function (err) {
+                    self._stopCamera();
+                    frappe.msgprint(__('Camera access error: {0}', [err || __('Permission denied')]));
+                });
+            } catch (e) {
+                self._stopCamera();
+                frappe.msgprint(__('Could not start camera scanner.'));
+            }
+        });
+    },
+
+    _stopCamera: function () {
+        var self = this;
+        if (this.state.html5Qrcode && this.state.cameraActive) {
+            try {
+                this.state.html5Qrcode.stop().then(function () {
+                    if (self.state.html5Qrcode) {
+                        self.state.html5Qrcode.clear();
+                        self.state.html5Qrcode = null;
+                    }
+                }).catch(function (err) {
+                    self.state.html5Qrcode = null;
+                });
+            } catch (e) {
+                this.state.html5Qrcode = null;
+            }
+        }
+        this.state.cameraActive = false;
+        $('#us-camera-wrapper').hide();
+        $('#us-cam-btn').removeClass('us-cam-stop').html('📷 Start Camera');
     },
 
     // ─── Scan Handling ────────────────────────────────────────────────────────
