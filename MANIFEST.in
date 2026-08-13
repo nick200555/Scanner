@@ -1,0 +1,2 @@
+include requirements.txt
+recursive-include universal_scanner *.json *.js *.css *.html *.txt *.md *.png *.svg *.ico

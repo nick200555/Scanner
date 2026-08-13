@@ -1,0 +1,13 @@
+{
+ "creation": "2026-08-13 00:00:00.000000",
+ "doctype": "Page",
+ "module": "Universal Scanner",
+ "name": "product-scanner",
+ "page_name": "product-scanner",
+ "standard": "Yes",
+ "title": "Product Scanner",
+ "roles": [
+  { "role": "Scanner User" },
+  { "role": "System Manager" }
+ ]
+}

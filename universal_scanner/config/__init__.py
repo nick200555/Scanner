@@ -1,0 +1,4 @@
+# Copyright (c) 2026, Universal Scanner Contributors
+# License: MIT
+
+# Config package

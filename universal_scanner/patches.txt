@@ -1,0 +1,2 @@
+# Patches are applied during bench migrate.
+# Format: app_name.path.to.patch_module

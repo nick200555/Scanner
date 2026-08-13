@@ -1,0 +1,2 @@
+# Frappe and ERPNext are runtime dependencies managed by bench.
+# Add any additional Python packages below if needed.
