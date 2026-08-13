@@ -1556,35 +1556,79 @@ UniversalScanner.prototype = {
     // Static image file test mode
     _runStaticImageTest: function (file) {
         var self = this;
-        var reader = new FileReader();
+
+        if (this.state.isCapturing) {
+            console.log('STATIC TEST: capture already in progress, ignoring');
+            return;
+        }
+        this.state.isCapturing = true;
 
         $('#us-dbg-stages').html('');
         $('#us-dbg-imgs').html('');
         $('#us-debug-panel').addClass('us-dbg-visible');
-        $('#us-cam-status').text('⏳ Processing static image…');
+        self._captureSetBusy(true, '⏳ Loading static image…');
 
-        self._dbgStage(1, 'Static image file loaded: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)', 'info');
+        self._dbgStage(1, 'Static image: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)', 'info');
+        console.log('STATIC TEST: reading file', file.name);
 
-        reader.onload = function (evt) {
-            var img = new Image();
-            img.onload = function () {
-                var vw = img.width;
-                var vh = img.height;
-                self._dbgStage(2, 'Static image dimensions: ' + vw + 'x' + vh + ' px', 'ok');
-
-                var canvas = document.createElement('canvas');
-                canvas.width = vw;
-                canvas.height = vh;
-                var ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0, vw, vh);
-                self._dbgAddImage(canvas, 'Full static image');
-
-                self._dbgStage(3, 'Using full static image as scan region (' + vw + 'x' + vh + ')', 'ok');
-                self._processScanPipeline(canvas, canvas);
+        try {
+            var reader = new FileReader();
+            reader.onerror = function () {
+                console.error('STATIC TEST: FileReader error');
+                self._dbgStage(2, 'FAIL — FileReader error reading file', 'fail');
+                self._captureReset('❌ Could not read the selected image file.');
             };
-            img.src = evt.target.result;
-        };
-        reader.readAsDataURL(file);
+            reader.onload = function (evt) {
+                try {
+                    var img = new Image();
+                    img.onerror = function () {
+                        console.error('STATIC TEST: image load error');
+                        self._dbgStage(2, 'FAIL — Could not decode image file as an image', 'fail');
+                        self._captureReset('❌ Selected file is not a valid image.');
+                    };
+                    img.onload = function () {
+                        try {
+                            var vw = img.width;
+                            var vh = img.height;
+                            self._dbgStage(2, 'Static image dimensions: ' + vw + 'x' + vh + ' px', 'ok');
+                            console.log('STATIC TEST: image dimensions', vw, 'x', vh);
+
+                            var canvas = document.createElement('canvas');
+                            canvas.width = vw;
+                            canvas.height = vh;
+                            canvas.getContext('2d').drawImage(img, 0, 0, vw, vh);
+                            self._dbgAddImage(canvas, 'Full static image (' + vw + 'x' + vh + ')');
+
+                            self._dbgStage(3, 'Treating full image as scan region (' + vw + 'x' + vh + ')', 'ok');
+                            self._captureSetBusy(true, '⏳ Decoding EAN from static image…');
+
+                            setTimeout(function () {
+                                try {
+                                    self._processScanPipeline(canvas, canvas);
+                                } catch (ex) {
+                                    console.error('STATIC TEST: _processScanPipeline threw', ex);
+                                    self._dbgStage(5, 'EXCEPTION in pipeline: ' + (ex && ex.message || String(ex)), 'fail');
+                                    self._captureReset('❌ Pipeline error: ' + (ex && ex.message || 'Unknown error'));
+                                }
+                            }, 0);
+                        } catch (ex) {
+                            console.error('STATIC TEST: canvas/draw error', ex);
+                            self._dbgStage(2, 'EXCEPTION drawing image: ' + (ex && ex.message || String(ex)), 'fail');
+                            self._captureReset('❌ Could not draw image to canvas: ' + (ex && ex.message || 'Unknown error'));
+                        }
+                    };
+                    img.src = evt.target.result;
+                } catch (ex) {
+                    console.error('STATIC TEST: reader.onload threw', ex);
+                    self._captureReset('❌ Error loading image: ' + (ex && ex.message || 'Unknown error'));
+                }
+            };
+            reader.readAsDataURL(file);
+        } catch (ex) {
+            console.error('STATIC TEST: synchronous error', ex);
+            self._dbgStage(1, 'EXCEPTION: ' + (ex && ex.message || String(ex)), 'fail');
+            self._captureReset('❌ Failed to start image test: ' + (ex && ex.message || 'Unknown error'));
+        }
     },
 
     // Stages 4 through 8: Barcode localization, preprocessing, EAN-13 decoding, checksum validation
