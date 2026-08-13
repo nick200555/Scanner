@@ -677,7 +677,8 @@ UniversalScanner.prototype = {
                 '<canvas id="us-capture-canvas"></canvas>' +
                 /* Debug preview panel — shows captured/cropped frames + stage log */
                 '<div id="us-debug-panel">' +
-                  '<div class="us-dbg-title">📋 Decode Debug</div>' +
+                  '<div class="us-dbg-title">📋 Decode Debug <button id="us-file-test-btn" style="float:right;font-size:10px;padding:2px 8px;border-radius:4px;border:1px solid rgba(255,255,255,0.3);background:rgba(99,102,241,0.4);color:#fff;cursor:pointer;">📁 Test Static Image</button></div>' +
+                  '<input type="file" id="us-test-file-input" accept="image/*" style="display:none" />' +
                   '<div id="us-dbg-stages"></div>' +
                   '<div class="us-dbg-imgs" id="us-dbg-imgs"></div>' +
                 '</div>' +
@@ -782,6 +783,18 @@ UniversalScanner.prototype = {
 
         $('#us-stop-cam-btn').on('click', function () {
             self._stopCamera();
+        });
+
+        $('#us-file-test-btn').on('click', function (e) {
+            e.stopPropagation();
+            $('#us-test-file-input').click();
+        });
+
+        $('#us-test-file-input').on('change', function (e) {
+            var file = e.target.files && e.target.files[0];
+            if (file) {
+                self._runStaticImageTest(file);
+            }
         });
 
         // Click on wrapper → focus input
@@ -1171,58 +1184,525 @@ UniversalScanner.prototype = {
         });
     },
 
-    // ── Debug helpers ──────────────────────────────────────────────────────────────────
-    _dbgStage: function (n, msg, type) {
-        var cls = type === 'ok' ? 'us-dbg-ok' : type === 'fail' ? 'us-dbg-fail' : 'us-dbg-info';
-        var icon = type === 'ok' ? '✅' : type === 'fail' ? '❌' : 'ℹ';
-        var line = '<div class="us-dbg-stage ' + cls + '">' + icon + ' Stage ' + n + ': ' + msg + '</div>';
-        $('#us-dbg-stages').append(line);
-        console.log('[US Stage ' + n + '] ' + msg);
+    // ──────────────────────────────────────────────────────────────────────────
+    // Stage 1–8 Barcode Image Processing & Decoding Pipeline
+    // ──────────────────────────────────────────────────────────────────────────
+
+    // Validate EAN-13 (12 data + 1 check digit) and EAN-8 (7 data + 1 check digit) checksums
+    _validateEanChecksum: function (barcode) {
+        barcode = String(barcode || '').trim();
+        if (!/^\d+$/.test(barcode)) return false;
+
+        if (barcode.length === 13) {
+            var sum = 0;
+            for (var i = 0; i < 12; i++) {
+                var d = parseInt(barcode.charAt(i), 10);
+                sum += (i % 2 === 0) ? d : d * 3;
+            }
+            var check = (10 - (sum % 10)) % 10;
+            return check === parseInt(barcode.charAt(12), 10);
+        } else if (barcode.length === 8) {
+            var sum = 0;
+            for (var i = 0; i < 7; i++) {
+                var d = parseInt(barcode.charAt(i), 10);
+                sum += (i % 2 === 0) ? d * 3 : d;
+            }
+            var check = (10 - (sum % 10)) % 10;
+            return check === parseInt(barcode.charAt(7), 10);
+        }
+        return false;
     },
 
-    _dbgAddImage: function (canvas, label) {
-        try {
-            var url = canvas.toDataURL('image/jpeg', 0.7);
-            var wrap = $('<div class="us-dbg-img-wrap">' +
-                '<img src="' + url + '" alt="' + label + '">' +
-                '<div class="us-dbg-img-label">' + label + '</div>' +
-            '</div>');
-            $('#us-dbg-imgs').append(wrap);
-        } catch (e) { /* cross-origin safety */ }
+    // Barcode Localization: vertical edge energy analysis to crop tightly to barcode bars
+    _localizeBarcode: function (srcCanvas) {
+        var w = srcCanvas.width;
+        var h = srcCanvas.height;
+        if (w < 40 || h < 20) return { canvas: srcCanvas, bbox: [0, 0, w, h] };
+
+        var ctx = srcCanvas.getContext('2d');
+        var imgData = ctx.getImageData(0, 0, w, h);
+        var data = imgData.data;
+
+        var colEnergy = new Float32Array(w);
+        var rowEnergy = new Float32Array(h);
+
+        // Compute horizontal difference |P(x,y) - P(x+1,y)| (vertical bars have high horizontal gradient)
+        for (var y = 0; y < h; y += 2) {
+            var offset = y * w * 4;
+            for (var x = 0; x < w - 1; x += 2) {
+                var idx = offset + x * 4;
+                var g1 = (data[idx] * 299 + data[idx + 1] * 587 + data[idx + 2] * 114) / 1000;
+                var g2 = (data[idx + 4] * 299 + data[idx + 5] * 587 + data[idx + 6] * 114) / 1000;
+                var diff = Math.abs(g1 - g2);
+
+                colEnergy[x] += diff;
+                rowEnergy[y] += diff;
+            }
+        }
+
+        var colSum = 0;
+        for (var i = 0; i < w; i++) colSum += colEnergy[i];
+        var rowSum = 0;
+        for (var j = 0; j < h; j++) rowSum += rowEnergy[j];
+
+        var minX = 0, maxX = w - 1;
+        var minY = 0, maxY = h - 1;
+
+        if (colSum > 0) {
+            var acc = 0;
+            for (var i = 0; i < w; i++) {
+                acc += colEnergy[i];
+                if (acc > colSum * 0.10 && minX === 0) minX = i;
+                if (acc > colSum * 0.90 && maxX === w - 1) maxX = i;
+            }
+        }
+
+        if (rowSum > 0) {
+            var accR = 0;
+            for (var j = 0; j < h; j++) {
+                accR += rowEnergy[j];
+                if (accR > rowSum * 0.10 && minY === 0) minY = j;
+                if (accR > rowSum * 0.90 && maxY === h - 1) maxY = j;
+            }
+        }
+
+        // Add 15% padding around detected candidate
+        var bw = maxX - minX;
+        var bh = maxY - minY;
+        var padX = Math.round(bw * 0.15);
+        var padY = Math.round(bh * 0.15);
+
+        minX = Math.max(0, minX - padX);
+        maxX = Math.min(w - 1, maxX + padX);
+        minY = Math.max(0, minY - padY);
+        maxY = Math.min(h - 1, maxY + padY);
+
+        var cropW = maxX - minX;
+        var cropH = maxY - minY;
+
+        if (cropW < 50 || cropH < 25) {
+            return { canvas: srcCanvas, bbox: [0, 0, w, h] };
+        }
+
+        var tightCanvas = document.createElement('canvas');
+        tightCanvas.width = cropW;
+        tightCanvas.height = cropH;
+        tightCanvas.getContext('2d').drawImage(srcCanvas, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
+
+        return { canvas: tightCanvas, bbox: [minX, minY, cropW, cropH] };
+    },
+
+    // Preprocessing variants: generate 6 image variations (grayscale, high-contrast, Otsu, adaptive, inverted, rotated)
+    _generatePreprocessingVariants: function (srcCanvas) {
+        var variants = [];
+        var w = srcCanvas.width;
+        var h = srcCanvas.height;
+
+        function cloneC(c) {
+            var copy = document.createElement('canvas');
+            copy.width = c.width;
+            copy.height = c.height;
+            copy.getContext('2d').drawImage(c, 0, 0);
+            return copy;
+        }
+
+        // 1. Grayscale
+        var v1 = cloneC(srcCanvas);
+        var ctx1 = v1.getContext('2d');
+        var img1 = ctx1.getImageData(0, 0, w, h);
+        var d1 = img1.data;
+        for (var i = 0; i < d1.length; i += 4) {
+            var g = (d1[i] * 299 + d1[i + 1] * 587 + d1[i + 2] * 114) / 1000;
+            d1[i] = d1[i + 1] = d1[i + 2] = g;
+        }
+        ctx1.putImageData(img1, 0, 0);
+        variants.push({ canvas: v1, label: 'Grayscale' });
+
+        // 2. High Contrast (Stretch)
+        var v2 = cloneC(v1);
+        var ctx2 = v2.getContext('2d');
+        var img2 = ctx2.getImageData(0, 0, w, h);
+        var d2 = img2.data;
+        var minV = 255, maxV = 0;
+        for (var i = 0; i < d2.length; i += 4) {
+            if (d2[i] < minV) minV = d2[i];
+            if (d2[i] > maxV) maxV = d2[i];
+        }
+        var range = (maxV - minV) || 1;
+        for (var i = 0; i < d2.length; i += 4) {
+            var val = Math.min(255, Math.max(0, Math.round(((d2[i] - minV) / range) * 255)));
+            d2[i] = d2[i + 1] = d2[i + 2] = val;
+        }
+        ctx2.putImageData(img2, 0, 0);
+        variants.push({ canvas: v2, label: 'High Contrast' });
+
+        // 3. Otsu Binary Threshold
+        var v3 = cloneC(v2);
+        var ctx3 = v3.getContext('2d');
+        var img3 = ctx3.getImageData(0, 0, w, h);
+        var d3 = img3.data;
+        var hist = new Int32Array(256);
+        for (var i = 0; i < d3.length; i += 4) hist[d3[i]]++;
+        var totalPx = w * h;
+        var sumTotal = 0;
+        for (var t = 0; t < 256; t++) sumTotal += t * hist[t];
+        var sumB = 0, wB = 0, maxVar = 0, otsuT = 128;
+        for (var t = 0; t < 256; t++) {
+            wB += hist[t];
+            if (wB === 0) continue;
+            var wF = totalPx - wB;
+            if (wF === 0) break;
+            sumB += t * hist[t];
+            var mB = sumB / wB;
+            var mF = (sumTotal - sumB) / wF;
+            var varBetween = wB * wF * (mB - mF) * (mB - mF);
+            if (varBetween > maxVar) { maxVar = varBetween; otsuT = t; }
+        }
+        for (var i = 0; i < d3.length; i += 4) {
+            var bw = d3[i] >= otsuT ? 255 : 0;
+            d3[i] = d3[i + 1] = d3[i + 2] = bw;
+        }
+        ctx3.putImageData(img3, 0, 0);
+        variants.push({ canvas: v3, label: 'Otsu Binary' });
+
+        // 4. Adaptive Threshold
+        var v4 = cloneC(v2);
+        var ctx4 = v4.getContext('2d');
+        var img4 = ctx4.getImageData(0, 0, w, h);
+        var d4 = img4.data;
+        var avg = 0;
+        for (var i = 0; i < d4.length; i += 4) avg += d4[i];
+        avg = Math.round(avg / totalPx);
+        var adaptT = Math.round(avg * 0.9);
+        for (var i = 0; i < d4.length; i += 4) {
+            var bw = d4[i] >= adaptT ? 255 : 0;
+            d4[i] = d4[i + 1] = d4[i + 2] = bw;
+        }
+        ctx4.putImageData(img4, 0, 0);
+        variants.push({ canvas: v4, label: 'Adaptive Thresh' });
+
+        // 5. Inverted Binary
+        var v5 = cloneC(v3);
+        var ctx5 = v5.getContext('2d');
+        var img5 = ctx5.getImageData(0, 0, w, h);
+        var d5 = img5.data;
+        for (var i = 0; i < d5.length; i += 4) {
+            var inv = 255 - d5[i];
+            d5[i] = d5[i + 1] = d5[i + 2] = inv;
+        }
+        ctx5.putImageData(img5, 0, 0);
+        variants.push({ canvas: v5, label: 'Inverted Binary' });
+
+        // 6. Rotated 90°
+        var v6 = document.createElement('canvas');
+        v6.width = h;
+        v6.height = w;
+        var ctx6 = v6.getContext('2d');
+        ctx6.translate(h / 2, w / 2);
+        ctx6.rotate(Math.PI / 2);
+        ctx6.drawImage(v2, -w / 2, -h / 2);
+        variants.push({ canvas: v6, label: 'Rotated 90°' });
+
+        return variants;
+    },
+
+    // ────────────────────────────────────────────────────────────────
+    // _captureAndScan: main entry point for video camera frames
+    // Runs Stages 1 through 8
+    // ────────────────────────────────────────────────────────────────
+    _captureAndScan: function () {
+        var self = this;
+
+        if (!this.state.cameraActive || !this.state.cameraStream) {
+            frappe.msgprint(__('Camera is not active. Click "📷 Start Camera" first.'));
+            return;
+        }
+        if (this.state.isProcessing) { return; }
+
+        $('#us-dbg-stages').html('');
+        $('#us-dbg-imgs').html('');
+        $('#us-debug-panel').addClass('us-dbg-visible');
+        $('#us-capture-btn').prop('disabled', true);
+        $('#us-cam-status').text('⏳ Capturing frame…');
+
+        var video  = document.getElementById('us-camera-video');
+        var canvas = document.getElementById('us-capture-canvas');
+
+        var vw = video.videoWidth;
+        var vh = video.videoHeight;
+
+        // Stage 1: Camera frame captured
+        self._dbgStage(1, 'Camera frame captured', 'info');
+
+        if (!vw || !vh) {
+            self._dbgStage(1, 'FAIL — video dimensions are 0. Camera preview not loaded.', 'fail');
+            self._captureReset('Camera preview loading. Wait a moment and try again.');
+            return;
+        }
+
+        // Stage 2: Original frame dimensions
+        self._dbgStage(2, 'Canvas dimensions: ' + vw + 'x' + vh + ' px (Display: ' + video.clientWidth + 'x' + video.clientHeight + ')', 'ok');
+
+        canvas.width  = vw;
+        canvas.height = vh;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, vw, vh);
+        self._dbgAddImage(canvas, 'Full frame (' + vw + 'x' + vh + ')');
+
+        // Stage 3: Scan-box crop
+        var overlay   = document.querySelector('.us-cam-overlay');
+        var dispW     = overlay ? overlay.clientWidth  : video.clientWidth;
+        var dispH     = overlay ? overlay.clientHeight : video.clientHeight;
+        var scaleX    = vw / dispW;
+        var scaleY    = vh / dispH;
+
+        var boxW_disp = dispW * 0.70;
+        var boxH_disp = dispH * 0.38;
+        var boxX_disp = (dispW - boxW_disp) / 2;
+        var boxY_disp = (dispH - boxH_disp) / 2;
+
+        var cropX = Math.max(0, Math.min(Math.round(boxX_disp * scaleX), vw - 1));
+        var cropY = Math.max(0, Math.min(Math.round(boxY_disp * scaleY), vh - 1));
+        var cropW = Math.min(Math.round(boxW_disp * scaleX), vw - cropX);
+        var cropH = Math.min(Math.round(boxH_disp * scaleY), vh - cropY);
+
+        self._dbgStage(3, 'Scan-box crop: ' + cropW + 'x' + cropH + ' px at (' + cropX + ',' + cropY + ')', 'ok');
+
+        var cropCanvas = document.createElement('canvas');
+        cropCanvas.width  = cropW;
+        cropCanvas.height = cropH;
+        cropCanvas.getContext('2d').drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+        self._dbgAddImage(cropCanvas, 'Scan box (' + cropW + 'x' + cropH + ')');
+
+        self._processScanPipeline(canvas, cropCanvas);
+    },
+
+    // Static image file test mode
+    _runStaticImageTest: function (file) {
+        var self = this;
+        var reader = new FileReader();
+
+        $('#us-dbg-stages').html('');
+        $('#us-dbg-imgs').html('');
+        $('#us-debug-panel').addClass('us-dbg-visible');
+        $('#us-cam-status').text('⏳ Processing static image…');
+
+        self._dbgStage(1, 'Static image file loaded: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)', 'info');
+
+        reader.onload = function (evt) {
+            var img = new Image();
+            img.onload = function () {
+                var vw = img.width;
+                var vh = img.height;
+                self._dbgStage(2, 'Static image dimensions: ' + vw + 'x' + vh + ' px', 'ok');
+
+                var canvas = document.createElement('canvas');
+                canvas.width = vw;
+                canvas.height = vh;
+                var ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, vw, vh);
+                self._dbgAddImage(canvas, 'Full static image');
+
+                self._dbgStage(3, 'Using full static image as scan region (' + vw + 'x' + vh + ')', 'ok');
+                self._processScanPipeline(canvas, canvas);
+            };
+            img.src = evt.target.result;
+        };
+        reader.readAsDataURL(file);
+    },
+
+    // Stages 4 through 8: Barcode localization, preprocessing, EAN-13 decoding, checksum validation
+    _processScanPipeline: function (fullCanvas, scanBoxCanvas) {
+        var self = this;
+
+        // Stage 4: Barcode candidate localization
+        var locResult = self._localizeBarcode(scanBoxCanvas);
+        var tightCanvas = locResult.canvas;
+        var bbox = locResult.bbox;
+        self._dbgStage(4, 'Barcode candidate detected at box [' + bbox.join(', ') + ']', 'ok');
+
+        // Stage 5: Tight barcode crop
+        self._dbgStage(5, 'Tight barcode crop created: ' + tightCanvas.width + 'x' + tightCanvas.height + ' px', 'ok');
+        self._dbgAddImage(tightCanvas, 'Tight crop (' + tightCanvas.width + 'x' + tightCanvas.height + ')');
+
+        // Stage 6: Generated 6 preprocessing variants
+        var variants = self._generatePreprocessingVariants(tightCanvas);
+        self._dbgStage(6, 'Generated ' + variants.length + ' preprocessing variants', 'ok');
+
+        // Add preprocessed variant thumbnails to debug panel
+        variants.forEach(function (v) {
+            self._dbgAddImage(v.canvas, v.label);
+        });
+
+        // Stage 7: EAN-13 decoder attempts
+        self._dbgStage(7, 'Trying EAN-13 / EAN-8 decoding across preprocessed variants…', 'info');
+        $('#us-cam-status').text('⏳ Running EAN-13 decoding pipeline…');
+
+        // Run multi-variant ZXing decode
+        self._decodeVariantsWithZxing(fullCanvas, scanBoxCanvas, tightCanvas, variants);
+    },
+
+    // Execute ZXing decoding against all preprocessed variants & crops
+    _decodeVariantsWithZxing: function (fullCanvas, scanBoxCanvas, tightCanvas, variants) {
+        var self = this;
+
+        self._loadZxing(function (err) {
+            if (err || !window.ZXing) {
+                self._dbgStage(7, 'ZXing decoder unavailable — running html5-qrcode fallback', 'fail');
+                self._fallbackVariantsHtml5Qrcode(fullCanvas, scanBoxCanvas, tightCanvas, variants);
+                return;
+            }
+
+            var hints = new Map();
+            hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+                ZXing.BarcodeFormat.EAN_13,
+                ZXing.BarcodeFormat.EAN_8,
+                ZXing.BarcodeFormat.UPC_A,
+                ZXing.BarcodeFormat.UPC_E,
+                ZXing.BarcodeFormat.CODE_128
+            ]);
+            hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+            var reader = new ZXing.MultiFormatReader();
+            reader.setHints(hints);
+
+            function tryZxing(c) {
+                try {
+                    var imageData = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+                    var luminance = new ZXing.RGBLuminanceSource(imageData.data, c.width, c.height);
+                    var binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminance));
+                    var result = reader.decode(binaryBitmap);
+                    return result ? String(result.getText()).trim() : null;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            // List of canvases to attempt in priority order
+            var targets = [];
+            variants.forEach(function (v) {
+                targets.push({ canvas: v.canvas, name: 'Variant: ' + v.label });
+            });
+            targets.push({ canvas: tightCanvas, name: 'Tight Crop' });
+            targets.push({ canvas: scanBoxCanvas, name: 'Scan Box Crop' });
+            targets.push({ canvas: fullCanvas, name: 'Full Frame' });
+
+            for (var k = 0; k < targets.length; k++) {
+                var t = targets[k];
+                var raw = tryZxing(t.canvas);
+                if (raw) {
+                    self._dbgStage(7, 'ZXing succeeded on ' + t.name + ' → "' + raw + '"', 'ok');
+                    self._onCaptureResult(raw);
+                    return;
+                }
+            }
+
+            self._dbgStage(7, 'ZXing passes completed (no result) — checking html5-qrcode fallback', 'fail');
+            self._fallbackVariantsHtml5Qrcode(fullCanvas, scanBoxCanvas, tightCanvas, variants);
+        });
+    },
+
+    // Fallback: html5-qrcode scanFile against localized & preprocessed targets
+    _fallbackVariantsHtml5Qrcode: function (fullCanvas, scanBoxCanvas, tightCanvas, variants) {
+        var self = this;
+
+        self._loadHtml5QrcodeLibrary(function () {
+            if (!window.Html5Qrcode) {
+                self._dbgStage(7, 'html5-qrcode fallback unavailable', 'fail');
+                self._dbgStage(8, 'FAIL — Could not decode EAN barcode from any variant', 'fail');
+                self._captureReset('❌ Could not decode EAN barcode. Check the tight crop thumbnails in the debug panel.');
+                return;
+            }
+
+            var targets = [
+                { canvas: tightCanvas, name: 'fallback tight crop' },
+                { canvas: variants[1].canvas, name: 'fallback high contrast' },
+                { canvas: variants[2].canvas, name: 'fallback Otsu binary' },
+                { canvas: scanBoxCanvas, name: 'fallback scan box' }
+            ];
+
+            function tryNextFallback(idx) {
+                if (idx >= targets.length) {
+                    self._dbgStage(7, 'html5-qrcode fallback passes exhausted', 'fail');
+                    self._dbgStage(8, 'FAIL — Could not decode EAN barcode from any variant', 'fail');
+                    self._captureReset('❌ Could not decode EAN barcode. Inspect the tight crop thumbnails in the debug panel below.');
+                    return;
+                }
+                var item = targets[idx];
+                item.canvas.toBlob(function (blob) {
+                    if (!blob) { tryNextFallback(idx + 1); return; }
+                    var file = new File([blob], 'scan.jpg', { type: 'image/jpeg' });
+                    var tid  = 'us-qr-tmp-' + Date.now();
+                    var div  = document.createElement('div');
+                    div.id   = tid;
+                    div.style.display = 'none';
+                    document.body.appendChild(div);
+
+                    var sc = new Html5Qrcode(tid);
+                    sc.scanFile(file, false)
+                        .then(function (txt) {
+                            document.body.removeChild(div);
+                            var raw = String(txt || '').trim();
+                            if (raw) {
+                                self._dbgStage(7, 'html5-qrcode succeeded on ' + item.name + ' → "' + raw + '"', 'ok');
+                                self._onCaptureResult(raw);
+                            } else {
+                                tryNextFallback(idx + 1);
+                            }
+                        })
+                        .catch(function () {
+                            document.body.removeChild(div);
+                            tryNextFallback(idx + 1);
+                        });
+                }, 'image/jpeg', 0.97);
+            }
+
+            tryNextFallback(0);
+        });
     },
 
     // ── Called when a decoded EAN string arrives ─────────────────────────────────
     _onCaptureResult: function (raw) {
         var self = this;
 
-        // STAGE 6: EAN validation
+        // Stage 8A: Format validation (must be digits only, length 8 or 13)
         if (!raw || !/^\d+$/.test(raw)) {
-            self._dbgStage(6, 'FAIL — not all-digits: "' + raw + '"', 'fail');
-            self._captureReset('⚠ Decoded a non-numeric value: "' + raw + '". Not an EAN barcode.');
+            self._dbgStage(8, 'FAIL — decoded non-numeric value: "' + raw + '"', 'fail');
+            self._captureReset('⚠ Decoded value is not numeric: "' + raw + '". Not an EAN barcode.');
             return;
         }
         if (raw.length !== 8 && raw.length !== 13) {
-            self._dbgStage(6, 'FAIL — length ' + raw.length + ' (need 8 or 13): ' + raw, 'fail');
-            self._captureReset('⚠ Decoded ' + raw.length + '-digit code "' + raw + '". Need EAN-8 (8) or EAN-13 (13).');
+            self._dbgStage(8, 'FAIL — decoded ' + raw.length + '-digit value: "' + raw + '" (expected 8 or 13 digits)', 'fail');
+            self._captureReset('⚠ Decoded ' + raw.length + '-digit code "' + raw + '". Expected EAN-8 (8) or EAN-13 (13).');
             return;
         }
-        self._dbgStage(6, 'EAN validated — ' + raw.length + ' digits: ' + raw, 'ok');
 
-        // STAGE 7: Debounce check (same barcode recently? skip)
+        // Stage 8B: EAN Checksum validation (12 data + 1 check digit / 7 data + 1 check digit)
+        var isChecksumValid = self._validateEanChecksum(raw);
+        if (!isChecksumValid) {
+            self._dbgStage(8, 'FAIL — INVALID EAN CHECK DIGIT for "' + raw + '"', 'fail');
+            self._captureReset('❌ INVALID EAN CHECK DIGIT for ' + raw + '. Barcode may be distorted or misread.');
+            return;
+        }
+
+        self._dbgStage(8, 'EAN decoded & checksum valid: ' + raw, 'ok');
+
+        // Debounce check (same barcode within 1.5s → skip duplicate submit)
         var now = Date.now();
         if (raw === self.state.lastScannedBarcode && (now - self.state.lastScanTs) < 1500) {
-            self._dbgStage(7, 'Debounce — same EAN within 1500ms, skipping duplicate', 'info');
+            self._dbgStage(8, 'Debounce — same EAN scanned within 1.5s, skipping duplicate submit', 'info');
             self._captureReset('⏸ Same barcode scanned within 1.5s — wait or scan a different product.');
             return;
         }
         self.state.lastScannedBarcode = raw;
-        self._dbgStage(7, 'scan_product() called with EAN: ' + raw, 'ok');
 
-        // Populate visible barcode input
+        // Populate visible barcode input field automatically
         $('#us-barcode-input').val(raw);
-        $('#us-cam-status').html('✅ EAN: <strong>' + raw + '</strong> — looking up product…');
+        $('#us-cam-status').html('✅ <strong>✓ EAN DETECTED</strong>: <strong>' + raw + '</strong> — looking up product…');
 
-        // Call existing scan pipeline (stages 8–9 happen in _handleScan)
+        self._dbgStage(8, 'scan_product() called with EAN: ' + raw, 'ok');
+
+        // Call existing scan pipeline
         self._handleScan(raw);
 
         // Re-enable capture button after 2.5s
