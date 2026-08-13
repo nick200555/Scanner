@@ -726,48 +726,69 @@ UniversalScanner.prototype = {
                 self.state.html5Qrcode = html5Qrcode;
                 self.state.cameraActive = true;
 
+                // NOTE: Do NOT use Html5QrcodeSupportedFormats enum — it may be
+                // undefined in certain CDN builds, causing the config to be
+                // garbage-collected and the library returning format IDs instead
+                // of decoded text. Let html5-qrcode auto-detect all 1D/2D formats;
+                // we validate EAN length client-side after decoding.
                 var config = {
                     fps: 10,
-                    qrbox: { width: 280, height: 180 },
-                    aspectRatio: 1.5,
-                    formatsToSupport: [
-                        Html5QrcodeSupportedFormats.EAN_13,
-                        Html5QrcodeSupportedFormats.EAN_8,
-                        Html5QrcodeSupportedFormats.UPC_A,
-                        Html5QrcodeSupportedFormats.UPC_E,
-                        Html5QrcodeSupportedFormats.CODE_128,
-                        Html5QrcodeSupportedFormats.CODE_39
-                    ]
+                    qrbox: { width: 300, height: 200 },
+                    aspectRatio: 1.5
                 };
 
                 html5Qrcode.start(
                     { facingMode: 'environment' },
                     config,
                     function (decodedText, decodedResult) {
-                        // Raw decoded text as string preserving leading zeros (e.g. "0123456789012")
+                        // html5-qrcode callback: first arg is always the decoded STRING.
+                        // Always cast to string to preserve leading zeros (e.g. "0123456789012").
                         var barcode = String(decodedText || '').trim();
-                        if (!barcode) return;
 
+                        // ── EAN validation ────────────────────────────────
+                        // Only process values that look like real EAN barcodes:
+                        // numeric, 8 chars (EAN-8) or 13 chars (EAN-13).
+                        if (!barcode || !/^\d+$/.test(barcode)) {
+                            // Not a numeric barcode string — ignore silently
+                            return;
+                        }
+                        if (barcode.length !== 8 && barcode.length !== 13) {
+                            // Not a standard EAN length — skip without error
+                            // (allows Code-128/QR through only if numeric and right length)
+                            return;
+                        }
+                        // ─────────────────────────────────────────────────
+
+                        // Camera-specific debounce: 1500ms prevents the same
+                        // barcode from being submitted 10× per second while
+                        // the user holds it steady in front of the camera.
                         var now = Date.now();
-                        if (now - self.state.lastScanTs < self.state.debounceMs) {
+                        if (now - self.state.lastScanTs < 1500) {
                             return;
                         }
                         if (self.state.isProcessing) {
                             return;
                         }
 
+                        // Populate the barcode input field visually so the user
+                        // can see what the camera decoded before the API call.
+                        $('#us-barcode-input').val(barcode);
+
                         self._handleScan(barcode);
                     },
                     function (errorMessage) {
-                        // Silent scanning frames callback
+                        // Per-frame detection failures are normal and expected.
+                        // Do NOT show errors here — the camera scans many frames
+                        // before successfully decoding a barcode.
                     }
                 ).catch(function (err) {
                     self._stopCamera();
-                    frappe.msgprint(__('Camera access error: {0}', [err || __('Permission denied')]));
+                    var msg = (err && (err.message || String(err))) || 'Permission denied';
+                    frappe.msgprint(__('Camera access error: {0}', [msg]));
                 });
             } catch (e) {
                 self._stopCamera();
-                frappe.msgprint(__('Could not start camera scanner.'));
+                frappe.msgprint(__('Could not start camera scanner: {0}', [e.message || String(e)]));
             }
         });
     },
